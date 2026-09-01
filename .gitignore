@@ -1,0 +1,26 @@
+target/
+*.class
+*.jar
+*.war
+.gradle/
+build/
+
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+*.log
+.env
+.env.*
+
+# Vendored Spring Boot reference source kept locally for study; not on the build path
+/org/
+
+# Machine-local Claude Code permissions
+.claude/settings.local.json

@@ -1,0 +1,64 @@
+package com.bookit.servicecalllogging.autoconfigure;
+
+import com.bookit.servicecalllogging.ResponseCodeExtractor;
+import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
+import com.bookit.servicecalllogging.interceptor.OutboundCallInterceptor;
+import com.bookit.servicecalllogging.logging.CallLogger;
+import com.bookit.servicecalllogging.metrics.OutboundCallMetrics;
+import com.bookit.servicecalllogging.resolver.DestinationNameResolver;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.web.client.RestTemplateCustomizer;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import java.util.Optional;
+
+/**
+ * Blocking-path instrumentation, active only when {@code RestTemplate} is on the consumer's
+ * classpath (FR-024, Constitution Principle II).
+ *
+ * <p>The class-level {@code @ConditionalOnClass} deliberately uses the string {@code name}
+ * form. A {@code .class} literal here would force the JVM to resolve {@code RestTemplate} when
+ * reading this configuration class's annotations, throwing {@code NoClassDefFoundError} in a
+ * consumer that has no blocking client — exactly the startup failure Principle II forbids.
+ */
+@Configuration(proxyBeanMethods = false)
+@ConditionalOnClass(name = "org.springframework.web.client.RestTemplate")
+class RestTemplateInstrumentationConfiguration {
+
+    /**
+     * The extractor is optional: with no Jackson and no consumer-supplied bean there is nothing
+     * to parse with, so the starter degrades to {@code responseCode=absent} rather than
+     * failing to start.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    OutboundCallInterceptor outboundCallInterceptor(DestinationNameResolver destinationNameResolver,
+                                                    ObjectProvider<ResponseCodeExtractor> responseCodeExtractor,
+                                                    CallLogger callLogger,
+                                                    ObjectProvider<OutboundCallMetrics> outboundCallMetrics,
+                                                    ServiceCallLoggingProperties properties) {
+        return new OutboundCallInterceptor(
+                destinationNameResolver,
+                responseCodeExtractor.getIfAvailable(() -> bytes -> Optional.empty()),
+                callLogger,
+                // Absent whenever the consumer has no MeterRegistry; logging continues regardless.
+                outboundCallMetrics.getIfAvailable(),
+                properties);
+    }
+
+    /**
+     * Applies the interceptor to every {@code RestTemplate} built through the
+     * {@code RestTemplateBuilder}. Named so a consumer can replace just this wiring.
+     *
+     * <p>Known limitation: a {@code RestTemplate} created with {@code new RestTemplate()} never
+     * passes through a customizer and is therefore not instrumented.
+     */
+    @Bean
+    @ConditionalOnMissingBean(name = "serviceCallLoggingRestTemplateCustomizer")
+    RestTemplateCustomizer serviceCallLoggingRestTemplateCustomizer(OutboundCallInterceptor interceptor) {
+        return restTemplate -> restTemplate.getInterceptors().add(interceptor);
+    }
+}
