@@ -98,4 +98,23 @@ class DataHygieneArchTest {
 
         rule.check(PRODUCTION_CLASSES);
     }
+
+    @Test
+    void theLoggedFieldSetIsExactlyTheOneTheConstitutionPermits() {
+        // Constitution Principle VII (v1.1.0): source/destination correlation values, the parsed
+        // responseCode, and — since the v1.1.0 amendment — the extracted business message.
+        // Anything else appearing here is a data-hygiene regression, not a feature.
+        List<String> permitted = List.of(
+                "source", "destination", "httpMethod", "httpStatusCode", "httpStatusGroup",
+                "responseCode", "message", "timestamp");
+
+        List<String> actual = Stream.of(
+                        com.bookit.servicecalllogging.logging.OutboundCallRecord.class.getRecordComponents())
+                .map(java.lang.reflect.RecordComponent::getName)
+                .toList();
+
+        assertThat(actual)
+                .as("Constitution Principle VII — the loggable field set is fixed and exhaustive")
+                .containsExactlyInAnyOrderElementsOf(permitted);
+    }
 }

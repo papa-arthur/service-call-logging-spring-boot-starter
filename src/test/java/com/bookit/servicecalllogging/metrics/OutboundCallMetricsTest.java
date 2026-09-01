@@ -76,7 +76,8 @@ class OutboundCallMetricsTest {
     void configuredPrefixAndTagNamesAreHonoured() {
         ServiceCallLoggingProperties custom = new ServiceCallLoggingProperties(
                 true, "X-Source-Service", "X-Destination-Service", "service_name", 1_048_576,
-                new ServiceCallLoggingProperties.Metrics("custom.calls", "target", "result", "status_bucket"));
+                new ServiceCallLoggingProperties.Metrics("custom.calls", "target", "result", "status_bucket"),
+                java.util.List.of());
 
         new OutboundCallMetrics(this.registry, custom).record("svc:8080", Outcome.FAILURE, "4xx");
 
@@ -95,5 +96,19 @@ class OutboundCallMetricsTest {
             this.metrics.record(null, Outcome.SUCCESS, "2xx");
             this.metrics.record("svc:8080", Outcome.SUCCESS, null);
         }).doesNotThrowAnyException();
+    }
+
+    @Test
+    void theCounterCarriesExactlyThreeTagsAndNeverOneDerivedFromTheMessage() {
+        this.metrics.record("svc:8080", Outcome.SUCCESS, "2xx");
+
+        Counter counter = this.registry.find("http.outbound.calls.total").counter();
+        assertThat(counter).isNotNull();
+
+        // research.md section 5: the extracted message is a logged field only. Using it as a tag
+        // value would be an unbounded-cardinality hazard, so the tag set must stay exactly these.
+        assertThat(counter.getId().getTags())
+                .extracting(io.micrometer.core.instrument.Tag::getKey)
+                .containsExactlyInAnyOrder("destination", "outcome", "http_status_group");
     }
 }

@@ -9,7 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class OutboundCallRecordTest {
 
     @Test
-    void constructorSetsEverySevenFieldAndAccessorsReturnThem() {
+    void constructorSetsEveryFieldAndAccessorsReturnThem() {
         Instant timestamp = Instant.parse("2026-08-27T10:15:30Z");
 
         OutboundCallRecord record = new OutboundCallRecord(
@@ -19,6 +19,7 @@ class OutboundCallRecordTest {
                 200,
                 "2xx",
                 0,
+                "OK",
                 timestamp);
 
         assertThat(record.source()).isEqualTo("my-service");
@@ -27,6 +28,7 @@ class OutboundCallRecordTest {
         assertThat(record.httpStatusCode()).isEqualTo(200);
         assertThat(record.httpStatusGroup()).isEqualTo("2xx");
         assertThat(record.responseCode()).isEqualTo(0);
+        assertThat(record.message()).isEqualTo("OK");
         assertThat(record.timestamp()).isEqualTo(timestamp);
     }
 
@@ -39,11 +41,26 @@ class OutboundCallRecordTest {
                 null,
                 "network-error",
                 null,
+                null,
                 Instant.now());
 
         assertThat(record.httpStatusCode()).isNull();
         assertThat(record.responseCode()).isNull();
+        assertThat(record.message()).isNull();
         assertThat(record.timestamp()).isNotNull();
         assertThat(record.httpStatusGroup()).isEqualTo("network-error");
+    }
+
+    @Test
+    void theMessageIsCarriedIndependentlyOfTheResponseCode() {
+        OutboundCallRecord codeWithoutMessage = new OutboundCallRecord(
+                "my-service", "svc:8080", "GET", 200, "2xx", 0, null, Instant.now());
+        OutboundCallRecord messageWithoutCode = new OutboundCallRecord(
+                "my-service", "svc:8080", "GET", 200, "2xx", null, "Declined", Instant.now());
+
+        assertThat(codeWithoutMessage.responseCode()).isEqualTo(0);
+        assertThat(codeWithoutMessage.message()).isNull();
+        assertThat(messageWithoutCode.responseCode()).isNull();
+        assertThat(messageWithoutCode.message()).isEqualTo("Declined");
     }
 }

@@ -27,7 +27,8 @@ class OutboundCallInterceptorTest {
     private static final ServiceCallLoggingProperties DEFAULTS = new ServiceCallLoggingProperties(
             true, "X-Source-Service", "X-Destination-Service", "service_name", 1_048_576,
             new ServiceCallLoggingProperties.Metrics(
-                    "http.outbound.calls", "destination", "outcome", "http_status_group"));
+                    "http.outbound.calls", "destination", "outcome", "http_status_group"),
+            java.util.List.of());
 
     private RecordingCallLogger callLogger;
     private OutboundCallInterceptor interceptor;
@@ -56,7 +57,8 @@ class OutboundCallInterceptorTest {
     @Test
     void honoursConfiguredHeaderNames() throws Exception {
         ServiceCallLoggingProperties custom = new ServiceCallLoggingProperties(
-                true, "X-From", "X-To", "service_name", 1_048_576, DEFAULTS.metrics());
+                true, "X-From", "X-To", "service_name", 1_048_576, DEFAULTS.metrics(),
+                java.util.List.of());
         OutboundCallInterceptor customInterceptor = new OutboundCallInterceptor(
                 new DestinationNameResolver("my-service"), new SimpleJsonExtractor(),
                 this.callLogger, custom);

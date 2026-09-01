@@ -2,7 +2,8 @@
 
 Auto-configurable Spring Boot 3 starter that instruments **every outbound HTTP call** your
 service makes. It stamps each request with source/destination correlation headers, reads the
-`responseCode` field from the shared response envelope, logs it, and records Prometheus-ready
+business outcome code and message from the response envelope — using field names you configure,
+if the defaults don't match your downstream API — logs them, and records Prometheus-ready
 counters for Grafana dashboards and alerts.
 
 It does all of that **without any code change in your service**, and — by design and by
@@ -25,6 +26,7 @@ activates only if that client is already on your classpath.
 
 - [What you get](#what-you-get)
 - [Configuration reference](#configuration-reference)
+- [Response envelopes: configuring field names](#response-envelopes-configuring-field-names)
 - [What gets logged](#what-gets-logged)
 - [Metrics and Grafana](#metrics-and-grafana)
 - [Replacing the responseCode extractor](#replacing-the-responsecode-extractor)
@@ -49,7 +51,7 @@ In your logs:
 
 ```
 INFO  c.b.s.logging.CallLogger - outbound-call source=my-service destination=payments-service:8080 \
-      method=POST httpStatus=200 httpStatusGroup=2xx responseCode=0
+      method=POST httpStatus=200 httpStatusGroup=2xx responseCode=0 responseMessage=OK
 ```
 
 At `/actuator/prometheus` (when Actuator is present):
@@ -73,7 +75,7 @@ If `spring.application.name` is not set, the source name is reported as `unknown
 
 ## Configuration reference
 
-Every key is optional. All nine are listed here with their type, default and effect.
+Every key is optional. All ten are listed here with their type, default and effect.
 
 ### Master switch
 
@@ -94,6 +96,7 @@ Every key is optional. All nine are listed here with their type, default and eff
 | Key | Type | Default | Effect |
 |---|---|---|---|
 | `service-call-logging.max-body-bytes` | `int` | `1048576` (1 MB) | Ceiling on response bytes read for `responseCode` extraction. Bodies larger than this are **not parsed** and report `responseCode=absent` — but are still delivered to your code in full. Set to `0` to skip body reading entirely. |
+| `service-call-logging.envelopes` | `List` | empty | Ordered list of response-envelope field-name combinations. Each entry takes `code-field` (default `responseCode`), `message-field` (default `message`) and `successful-value` (default `0`). See [Response envelopes](#response-envelopes-configuring-field-names). |
 
 ### Metrics
 
@@ -113,6 +116,7 @@ service-call-logging:
   destination-header-name: X-Destination-Service
   service-name-hint-header: service_name
   max-body-bytes: 1048576
+  envelopes: []          # empty = use responseCode / message / 0 for every call
   metrics:
     prefix: http.outbound.calls
     destination-tag-name: destination
@@ -124,9 +128,57 @@ Full contract: [`contracts/configuration.md`](specs/001-outbound-http-observabil
 
 ---
 
+## Response envelopes: configuring field names
+
+The starter reads two things from each JSON response body: a numeric **outcome code** and a
+human-readable **message**. By default it looks for `responseCode` and `message`, and treats `0`
+as success.
+
+Different APIs name these differently. Configure the pairs you actually call:
+
+```yaml
+service-call-logging:
+  envelopes:
+    - code-field: statusCode
+      message-field: message
+    - code-field: responseCode
+      message-field: responseDescription
+      successful-value: 1
+```
+
+**How a combination is chosen — per call, by the response body, not by destination.** For each
+response, the starter walks your list in order and uses the **first entry whose `code-field` is
+actually present** in the body, falling back to the built-in `responseCode`/`message`/`0` when
+none match. Nothing is bound to a hostname, so one service can call any number of APIs with
+different conventions and each call is interpreted correctly on its own.
+
+| Response body (given the config above) | `responseCode` | `responseMessage` | Outcome |
+|---|---|---|---|
+| `{"statusCode":0,"message":"OK"}` | `0` | `OK` | success |
+| `{"statusCode":7,"message":"Declined"}` | `7` | `Declined` | failure |
+| `{"responseCode":1,"responseDescription":"OK"}` | `1` | `OK` | success — entry 2's successful value is `1` |
+| `{"responseCode":0,"responseDescription":"Nope"}` | `0` | `Nope` | failure — `0 != 1` for entry 2 |
+| `{"errorCode":500}` | `absent` | `absent` | absent |
+
+Three rules worth knowing:
+
+1. **Only the successful value is privileged.** Every other numeric value the code field can
+   hold is unsuccessful — including one you've never seen before. Nothing is ever silently
+   dropped as "unrecognised".
+2. **Order matters.** If a body could satisfy two entries, the earlier one wins. Put the more
+   specific entry first.
+3. **Each field falls back on its own.** Configure only `code-field` and the message is still
+   read from `message`.
+
+Full contracts:
+[`configuration.md`](specs/002-configurable-envelope-fields/contracts/configuration.md) ·
+[`envelope-matching.md`](specs/002-configurable-envelope-fields/contracts/envelope-matching.md)
+
+---
+
 ## What gets logged
 
-The set of logged fields is **fixed and exhaustive**. These six, and nothing else:
+The set of logged fields is **fixed and exhaustive**. These seven, and nothing else:
 
 | Field | Meaning |
 |---|---|
@@ -136,6 +188,7 @@ The set of logged fields is **fixed and exhaustive**. These six, and nothing els
 | `httpStatus` | Received HTTP status code, or `none` on a network error |
 | `httpStatusGroup` | `2xx` / `4xx` / `5xx` / `network-error` (also `1xx` / `3xx`) |
 | `responseCode` | Parsed business code, or `absent` |
+| `responseMessage` | Parsed business message, logged verbatim with no length limit, or `absent` |
 
 The starter **never** logs credentials, tokens, `Authorization` or `Cookie` header values, PII,
 or request/response bodies. This is enforced statically: a build-time check fails if any
@@ -210,9 +263,14 @@ Full schema: [`contracts/metrics-schema.md`](specs/001-outbound-http-observabili
 
 ## Replacing the responseCode extractor
 
-The default reads a **top-level integer** `responseCode` from a JSON body. If your envelope
-differs, declare your own bean — the default is `@ConditionalOnMissingBean`, so yours wins
-automatically and the default is never created.
+**Try configuration first.** If your envelope differs only in its *field names* or its success
+value, you don't need code at all — see
+[Response envelopes](#response-envelopes-configuring-field-names). Reach for a custom bean when
+the code isn't a top-level field, or isn't JSON.
+
+The default reads a top-level integer code from a JSON body, using the field names you
+configured. If that isn't enough, declare your own bean — the default is
+`@ConditionalOnMissingBean`, so yours wins automatically and the default is never created.
 
 For an envelope that nests the code under `data`:
 
@@ -244,9 +302,13 @@ Your implementation **must**:
 
 The starter is defensive about all five, but a violation costs you telemetry.
 
-`Optional.of(0)` → `success`; `Optional.of(n≠0)` → `failure`; `Optional.empty()` → `absent`.
-The raw integer is logged whatever it is, so you can correlate log lines with specific business
-error codes.
+`Optional.of(<the successful value>)` → `success`; any other value → `failure`;
+`Optional.empty()` → `absent`. The raw integer is logged whatever it is, so you can correlate log
+lines with specific business error codes.
+
+**Your bean still gets a message.** Message extraction runs independently of who supplies the
+code, so adding an `envelopes` entry gives an existing custom extractor a `responseMessage` with
+no change to your bean at all (subject to known limitation 7 below).
 
 Full contract: [`contracts/response-code-extractor-spi.md`](specs/001-outbound-http-observability/contracts/response-code-extractor-spi.md).
 
@@ -259,7 +321,8 @@ same type and yours is used instead:
 
 | Bean | Why you might replace it |
 |---|---|
-| `ResponseCodeExtractor` | Non-standard response envelope |
+| `ResponseCodeExtractor` | Response code that configuration alone can't express (e.g. nested, or non-JSON) |
+| `EnvelopeFieldExtractor` | Full control of envelope matching and message extraction |
 | `DestinationNameResolver` | Normalise destination names to control metric cardinality |
 | `CallLogger` | Change the log format, or emit structured JSON |
 | `OutboundCallMetrics` | Custom tagging |
@@ -288,9 +351,14 @@ Measured on the blocking path with the transport stubbed out, so the figure is p
 starter's own work — name resolution, header stamping, body buffering, JSON extraction, logging
 and the counter increment:
 
-| Body size | Overhead per call |
+| Scenario (52-byte JSON envelope) | Overhead per call |
 |---|---|
-| 52 bytes (typical JSON envelope) | **~3.3–3.8 µs** |
+| No `envelopes` configured | **~3.3–3.8 µs** |
+| Three combinations configured, matching one last | **~2.3–3.1 µs** |
+
+Adding envelope matching did **not** measurably change this: the extra bounded JSON parse is
+smaller than the run-to-run variance of the benchmark itself, and the number of configured
+combinations makes no practical difference at this body size.
 
 For context, that is roughly **three to four orders of magnitude below** a typical network round
 trip (1–100 ms). Cost scales with body size up to `max-body-bytes` and stops there: past the cap
@@ -338,6 +406,22 @@ These are stated up front so you never discover them in production.
    WebClient before the starter is involved — exactly as it would without the starter. Raise
    the codec limit if you handle large reactive responses.
 
+6. **Envelope matching is order-sensitive.** If a response body satisfies more than one
+   configured `code-field`, the earliest entry in your list wins, deterministically. Order your
+   combinations from most specific to least — the starter cannot detect an ambiguous
+   configuration for you.
+
+7. **A custom `ResponseCodeExtractor` whose code isn't a same-named JSON field doesn't get a
+   configurable successful value.** If you decode a non-JSON or binary protocol, no configured
+   combination can ever match the body, so classification falls back to the built-in successful
+   value `0` — even if you configured something else. Your message will also be `absent`. Code
+   extraction itself is unaffected: your bean is still used, exactly as before.
+
+8. **The message is logged verbatim, with no length limit and no content filtering.** A
+   downstream API that returns a very long message, or one echoing data you'd rather not have in
+   your logs, will have it appear in full. You choose which field to read; that choice is yours
+   to make deliberately.
+
 ---
 
 ## Guarantees
@@ -357,6 +441,8 @@ each backed by an automated gate:
 - **Fully overridable.** Zero code changes required; every bean replaceable; one switch to
   disable.
 - **Data hygiene.** The logged field set is fixed, exhaustive and statically enforced.
+  The business message is part of that set by deliberate amendment to the project
+  constitution (v1.1.0) — nothing else was admitted with it.
 - **Semantic versioning.** Configuration keys are never silently renamed or removed within a
   major version; breaking changes bump MAJOR and ship a migration note.
 

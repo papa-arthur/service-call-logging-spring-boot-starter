@@ -8,7 +8,8 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Constitution Principle VII (Data Hygiene) bounds this class absolutely: the only values
  * it may ever emit are the fields of {@link OutboundCallRecord} — source, destination, method,
- * HTTP status, status group, and the parsed {@code responseCode}. It must never reference a
+ * HTTP status, status group, the parsed {@code responseCode}, and the business message (admitted
+ * to the fixed field set by constitution v1.1.0; logged verbatim, with no length bound). It must never reference a
  * header bag, a request or response body, or any credential. {@code DataHygieneArchTest}
  * enforces this statically.
  *
@@ -28,13 +29,15 @@ public class CallLogger {
      * @param record the call to log; never null
      */
     public void log(OutboundCallRecord record) {
-        log.info("outbound-call source={} destination={} method={} httpStatus={} httpStatusGroup={} responseCode={}",
+        log.info("outbound-call source={} destination={} method={} httpStatus={} httpStatusGroup={} "
+                        + "responseCode={} responseMessage={}",
                 record.source(),
                 record.destination(),
                 record.httpMethod(),
                 record.httpStatusCode() == null ? NONE : record.httpStatusCode(),
                 record.httpStatusGroup(),
-                record.responseCode() == null ? ABSENT : record.responseCode());
+                record.responseCode() == null ? ABSENT : record.responseCode(),
+                record.message() == null ? ABSENT : record.message());
     }
 
     /**

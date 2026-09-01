@@ -221,4 +221,67 @@ class MetricsIntegrationTest {
                             "127.0.0.1:" + this.server.port(), "success", "2xx")).isEqualTo(1.0);
                 });
     }
+
+    // ================= User Story 2 / 3 — configured classification reaches the counters ======
+
+    @Test
+    void aConfiguredSuccessfulValueDrivesTheSuccessAndFailureCounters() {
+        this.runner.withPropertyValues(
+                        "service-call-logging.envelopes[0].code-field=responseCode",
+                        "service-call-logging.envelopes[0].successful-value=1")
+                .run(context -> {
+                    RestTemplate restTemplate = lenient(context.getBean(RestTemplateBuilder.class));
+                    MeterRegistry registry = context.getBean(MeterRegistry.class);
+
+                    this.server.respondWith(200, "{\"responseCode\":1}");
+                    restTemplate.getForObject(this.server.url("/a"), String.class);
+
+                    this.server.respondWith(200, "{\"responseCode\":0}");
+                    restTemplate.getForObject(this.server.url("/b"), String.class);
+
+                    String destination = "127.0.0.1:" + this.server.port();
+                    assertThat(counter(registry, destination, "success", "2xx")).isEqualTo(1.0);
+                    assertThat(counter(registry, destination, "failure", "2xx")).isEqualTo(1.0);
+                });
+    }
+
+    @Test
+    void threeSimultaneousCombinationsAreCountedIndependentlyAndCorrectly() {
+        this.runner.withPropertyValues(
+                        "service-call-logging.envelopes[0].code-field=statusCode",
+                        "service-call-logging.envelopes[0].message-field=message",
+                        "service-call-logging.envelopes[1].code-field=responseCode",
+                        "service-call-logging.envelopes[1].message-field=responseDescription",
+                        "service-call-logging.envelopes[1].successful-value=1")
+                .run(context -> {
+                    RestTemplate restTemplate = lenient(context.getBean(RestTemplateBuilder.class));
+                    MeterRegistry registry = context.getBean(MeterRegistry.class);
+                    String destination = "127.0.0.1:" + this.server.port();
+
+                    // combination 1: statusCode 0 means success
+                    this.server.respondWith(200, "{\"statusCode\":0,\"message\":\"ok\"}");
+                    restTemplate.getForObject(this.server.url("/one"), String.class);
+
+                    // combination 2: responseCode 1 means success
+                    this.server.respondWith(200, "{\"responseCode\":1,\"responseDescription\":\"ok\"}");
+                    restTemplate.getForObject(this.server.url("/two"), String.class);
+
+                    // matches neither: absent
+                    this.server.respondWith(200, "{\"errorCode\":9}");
+                    restTemplate.getForObject(this.server.url("/three"), String.class);
+
+                    assertThat(counter(registry, destination, "success", "2xx")).isEqualTo(2.0);
+                    assertThat(counter(registry, destination, "absent", "2xx")).isEqualTo(1.0);
+                });
+    }
+
+    private static double counter(MeterRegistry registry, String destination, String outcome,
+                                  String statusGroup) {
+        Counter counter = registry.find("http.outbound.calls.total")
+                .tag("destination", destination)
+                .tag("outcome", outcome)
+                .tag("http_status_group", statusGroup)
+                .counter();
+        return counter == null ? -1 : counter.count();
+    }
 }

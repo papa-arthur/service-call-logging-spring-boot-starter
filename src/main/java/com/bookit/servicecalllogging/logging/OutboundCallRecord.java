@@ -7,8 +7,8 @@ import java.time.Instant;
  * {@link CallLogger}. Never persisted or serialised.
  *
  * <p>This type is the exhaustive list of what the starter is permitted to log
- * (Constitution Principle VII — Data Hygiene). No credential, cookie, header-bag, or body
- * field may ever be added here.
+ * (Constitution Principle VII — Data Hygiene, as amended in constitution v1.1.0 to admit the
+ * business message). No credential, cookie, header-bag, or body field may ever be added here.
  *
  * @param source          the calling service name ({@code spring.application.name}, or
  *                        {@code "unknown"}); never null
@@ -18,6 +18,9 @@ import java.time.Instant;
  * @param httpStatusGroup the status classification: {@code 2xx}/{@code 4xx}/{@code 5xx}/
  *                        {@code network-error} (also {@code 1xx}/{@code 3xx}); never null
  * @param responseCode    the parsed business code, or null when it could not be determined
+ * @param message         the business outcome message read from the matched envelope
+ *                        combination, or null when it could not be determined; independent of
+ *                        {@code responseCode}
  * @param timestamp       when the call was initiated; never null
  */
 public record OutboundCallRecord(
@@ -27,5 +30,6 @@ public record OutboundCallRecord(
         Integer httpStatusCode,
         String httpStatusGroup,
         Integer responseCode,
+        String message,
         Instant timestamp) {
 }

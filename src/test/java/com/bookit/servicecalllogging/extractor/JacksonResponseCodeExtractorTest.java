@@ -1,8 +1,10 @@
 package com.bookit.servicecalllogging.extractor;
 
+import com.bookit.servicecalllogging.ServiceCallLoggingProperties.Envelope;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -74,5 +76,22 @@ class JacksonResponseCodeExtractorTest {
             extract("{unclosed");
             extract("{\"responseCode\":");
         }).doesNotThrowAnyException();
+    }
+
+    @Test
+    void theDefaultExtractorReadsTheCodeFromAConfiguredCombination() {
+        JacksonResponseCodeExtractor configured = new JacksonResponseCodeExtractor(
+                new JacksonEnvelopeFieldExtractor(List.of(new Envelope("statusCode", "message", 0))));
+
+        assertThat(configured.extract("{\"statusCode\":7}".getBytes(StandardCharsets.UTF_8))).contains(7);
+    }
+
+    @Test
+    void theDefaultExtractorStillFallsBackToTheBuiltInFieldNameWhenNothingMatches() {
+        JacksonResponseCodeExtractor configured = new JacksonResponseCodeExtractor(
+                new JacksonEnvelopeFieldExtractor(List.of(new Envelope("statusCode", "message", 0))));
+
+        assertThat(configured.extract("{\"responseCode\":2}".getBytes(StandardCharsets.UTF_8))).contains(2);
+        assertThat(configured.extract("{\"neither\":2}".getBytes(StandardCharsets.UTF_8))).isEmpty();
     }
 }

@@ -1,5 +1,6 @@
 package com.bookit.servicecalllogging.autoconfigure;
 
+import com.bookit.servicecalllogging.EnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.ResponseCodeExtractor;
 import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
 import com.bookit.servicecalllogging.filter.OutboundCallExchangeFilter;
@@ -33,14 +34,17 @@ class WebClientInstrumentationConfiguration {
                                                           ObjectProvider<ResponseCodeExtractor> responseCodeExtractor,
                                                           CallLogger callLogger,
                                                           ObjectProvider<OutboundCallMetrics> outboundCallMetrics,
-                                                          ServiceCallLoggingProperties properties) {
+                                                          ServiceCallLoggingProperties properties,
+                                                          ObjectProvider<EnvelopeFieldExtractor> envelopeFieldExtractor) {
         return new OutboundCallExchangeFilter(
                 destinationNameResolver,
                 responseCodeExtractor.getIfAvailable(() -> bytes -> Optional.empty()),
                 callLogger,
                 // Absent whenever the consumer has no MeterRegistry; logging continues regardless.
                 outboundCallMetrics.getIfAvailable(),
-                properties);
+                properties,
+                // Absent whenever Jackson is missing; the message is then simply never read.
+                envelopeFieldExtractor.getIfAvailable());
     }
 
     /**

@@ -1,5 +1,7 @@
 package com.bookit.servicecalllogging.interceptor;
 
+import com.bookit.servicecalllogging.EnvelopeFieldExtractor;
+import com.bookit.servicecalllogging.EnvelopeMatch;
 import com.bookit.servicecalllogging.ResponseCodeExtractor;
 import com.bookit.servicecalllogging.metrics.ResponseCodeResult;
 import org.springframework.http.HttpHeaders;
@@ -55,6 +57,7 @@ public class BufferingClientHttpResponse implements ClientHttpResponse {
     private BodyState state = BodyState.NOT_BUFFERED;
     private byte[] cachedBody;
     private ResponseCodeResult peekResult;
+    private String peekedMessage;
 
     /**
      * @param delegate     the real response; never null
@@ -78,6 +81,26 @@ public class BufferingClientHttpResponse implements ClientHttpResponse {
      * @return the interpreted result; never null
      */
     public ResponseCodeResult peek(ResponseCodeExtractor extractor) {
+        return peek(extractor, null);
+    }
+
+    /**
+     * Reads the bounded body prefix once and interprets it twice: the code through
+     * {@code extractor} (the consumer's own bean when they have supplied one), and the message
+     * plus the applicable successful value through {@code envelopeFieldExtractor}. Both read the
+     * same cached bytes — one body read, no additional I/O.
+     *
+     * <p>Never throws, for either extractor, and is idempotent in exactly the same way as
+     * {@link #peek(ResponseCodeExtractor)}.
+     *
+     * @param extractor              the code extraction strategy; never null
+     * @param envelopeFieldExtractor the envelope matching engine, or null when Jackson is absent
+     *                               from the consumer's classpath — in which case no message is
+     *                               read and the built-in successful value applies
+     * @return the interpreted result; never null
+     */
+    public ResponseCodeResult peek(ResponseCodeExtractor extractor,
+                                   EnvelopeFieldExtractor envelopeFieldExtractor) {
         if (this.peekResult != null) {
             return this.peekResult;
         }
@@ -109,20 +132,44 @@ public class BufferingClientHttpResponse implements ClientHttpResponse {
             return this.peekResult;
         }
 
-        this.peekResult = applyExtractor(extractor, this.cachedBody);
+        EnvelopeMatch match = applyEnvelopeExtractor(envelopeFieldExtractor, this.cachedBody);
+        this.peekedMessage = match.message();
+        this.peekResult = applyExtractor(extractor, this.cachedBody, match.successfulValue());
         return this.peekResult;
     }
 
-    private static ResponseCodeResult applyExtractor(ResponseCodeExtractor extractor, byte[] body) {
+    /**
+     * @return the message read during {@link #peek}, or null when absent, unreadable, or peek
+     *         has not run yet
+     */
+    public String peekedMessage() {
+        return this.peekedMessage;
+    }
+
+    private static ResponseCodeResult applyExtractor(ResponseCodeExtractor extractor, byte[] body,
+                                                     int successfulValue) {
         try {
             Optional<Integer> code = extractor.extract(body);
             if (code == null || code.isEmpty()) {
                 return ResponseCodeResult.ABSENT;
             }
-            return ResponseCodeResult.of(code.get());
+            return ResponseCodeResult.of(code.get(), successfulValue);
         } catch (Exception extractorFailure) {
             // The body is already cached, so the caller is unaffected — only telemetry is lost.
             return ResponseCodeResult.ABSENT;
+        }
+    }
+
+    private static EnvelopeMatch applyEnvelopeExtractor(EnvelopeFieldExtractor extractor, byte[] body) {
+        if (extractor == null) {
+            return EnvelopeMatch.NONE;
+        }
+        try {
+            EnvelopeMatch match = extractor.extract(body);
+            return match == null ? EnvelopeMatch.NONE : match;
+        } catch (Exception extractorFailure) {
+            // Same contract as the code extractor: telemetry may be lost, the call may not.
+            return EnvelopeMatch.NONE;
         }
     }
 

@@ -113,4 +113,38 @@ class ResponseCodeExtractorOverrideTest {
             return new RecordingCallLogger();
         }
     }
+
+    @Test
+    void aConsumerExtractorStillGetsTheMessageFromTheStartersOwnFieldMatching() {
+        // FR-016 / Clarification 2026-09-01: the custom bean supplies the code; the starter
+        // independently supplies the message, with no change to the consumer's extractor.
+        this.server.respondWith(200, "{\"data\":{\"responseCode\":0},\"message\":\"All good\"}");
+
+        this.runner.withUserConfiguration(NestedExtractorConfig.class).run(context -> {
+            context.getBean(RestTemplateBuilder.class).build()
+                    .getForObject(this.server.url("/x"), String.class);
+
+            var record = context.getBean(RecordingCallLogger.class).onlyRecord();
+            assertThat(record.responseCode()).isEqualTo(0);
+            assertThat(record.message()).isEqualTo("All good");
+        });
+    }
+
+    @Test
+    void aConsumerExtractorIsClassifiedAgainstTheConfiguredSuccessfulValue() {
+        // The custom bean returns 1; a configured combination says 1 means success.
+        this.server.respondWith(200, "{\"data\":{\"responseCode\":1},\"responseCode\":1,\"message\":\"OK\"}");
+
+        this.runner.withUserConfiguration(NestedExtractorConfig.class)
+                .withPropertyValues(
+                        "service-call-logging.envelopes[0].code-field=responseCode",
+                        "service-call-logging.envelopes[0].successful-value=1")
+                .run(context -> {
+                    context.getBean(RestTemplateBuilder.class).build()
+                            .getForObject(this.server.url("/x"), String.class);
+
+                    assertThat(context.getBean(RecordingCallLogger.class).onlyRecord().responseCode())
+                            .isEqualTo(1);
+                });
+    }
 }

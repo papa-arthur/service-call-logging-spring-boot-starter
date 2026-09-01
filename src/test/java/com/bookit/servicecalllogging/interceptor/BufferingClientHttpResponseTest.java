@@ -1,12 +1,16 @@
 package com.bookit.servicecalllogging.interceptor;
 
+import com.bookit.servicecalllogging.EnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.ResponseCodeExtractor;
+import com.bookit.servicecalllogging.ServiceCallLoggingProperties.Envelope;
+import com.bookit.servicecalllogging.extractor.JacksonEnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.metrics.Outcome;
 import com.bookit.servicecalllogging.metrics.ResponseCodeResult;
 import com.bookit.servicecalllogging.testsupport.FakeClientHttpResponse;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -152,5 +156,83 @@ class BufferingClientHttpResponseTest {
 
         response.close();
         assertThat(delegate.isClosed()).isTrue();
+    }
+
+    // ---- envelope-aware peek (spec 002) -------------------------------------------------
+
+    private static BufferingClientHttpResponse over(String body) {
+        return new BufferingClientHttpResponse(
+                new FakeClientHttpResponse(body.getBytes(StandardCharsets.UTF_8)), CAP);
+    }
+
+    @Test
+    void theEnvelopeExtractorReadsTheMessageFromTheSameCachedPrefixWithoutASecondBodyRead() throws Exception {
+        String body = "{\"responseCode\":0,\"message\":\"OK\"}";
+        BufferingClientHttpResponse response = over(body);
+
+        ResponseCodeResult result = response.peek(
+                new com.bookit.servicecalllogging.extractor.JacksonResponseCodeExtractor(),
+                new JacksonEnvelopeFieldExtractor(List.of()));
+
+        assertThat(result.outcome()).isEqualTo(Outcome.SUCCESS);
+        assertThat(response.peekedMessage()).isEqualTo("OK");
+        // the caller's body survived both extractions intact
+        assertThat(response.getBody().readAllBytes()).isEqualTo(body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void aConfiguredSuccessfulValueDecidesTheOutcomeOfTheCachedPrefix() {
+        BufferingClientHttpResponse response = over("{\"statusCode\":1,\"message\":\"OK\"}");
+
+        ResponseCodeResult result = response.peek(
+                new com.bookit.servicecalllogging.extractor.JacksonResponseCodeExtractor(
+                        new JacksonEnvelopeFieldExtractor(List.of(new Envelope("statusCode", "message", 1)))),
+                new JacksonEnvelopeFieldExtractor(List.of(new Envelope("statusCode", "message", 1))));
+
+        assertThat(result.outcome()).isEqualTo(Outcome.SUCCESS);
+        assertThat(result.rawCode()).isEqualTo(1);
+        assertThat(response.peekedMessage()).isEqualTo("OK");
+    }
+
+    @Test
+    void aNullEnvelopeExtractorDegradesToNoMessageAndTheHistoricSuccessfulValue() {
+        BufferingClientHttpResponse response = over("{\"responseCode\":0,\"message\":\"OK\"}");
+
+        ResponseCodeResult result = response.peek(JSON_RESPONSE_CODE, null);
+
+        assertThat(result.outcome()).isEqualTo(Outcome.SUCCESS);
+        assertThat(response.peekedMessage()).isNull();
+    }
+
+    @Test
+    void anExplodingEnvelopeExtractorDegradesToAbsentMessageWithoutAffectingTheCode() throws Exception {
+        String body = "{\"responseCode\":0,\"message\":\"OK\"}";
+        BufferingClientHttpResponse response = over(body);
+        EnvelopeFieldExtractor exploding = bytes -> {
+            throw new IllegalStateException("envelope extractor exploded");
+        };
+
+        ResponseCodeResult result = response.peek(JSON_RESPONSE_CODE, exploding);
+
+        assertThat(result.outcome()).isEqualTo(Outcome.SUCCESS);
+        assertThat(response.peekedMessage()).isNull();
+        assertThat(response.getBody().readAllBytes()).isEqualTo(body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void anOversizedBodyReportsNoMessageJustAsItReportsNoCode() {
+        byte[] original = new byte[CAP * 2];
+        java.util.Arrays.fill(original, (byte) 'a');
+        BufferingClientHttpResponse response =
+                new BufferingClientHttpResponse(new FakeClientHttpResponse(original), CAP);
+
+        assertThat(response.peek(JSON_RESPONSE_CODE, new JacksonEnvelopeFieldExtractor(List.of())))
+                .isEqualTo(ResponseCodeResult.ABSENT);
+        assertThat(response.peekedMessage()).isNull();
+    }
+
+    @Test
+    void peekedMessageIsNullBeforePeekHasRun() {
+        assertThat(over("{\"responseCode\":0,\"message\":\"OK\"}").peekedMessage()).isNull();
     }
 }

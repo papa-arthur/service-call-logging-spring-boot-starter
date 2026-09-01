@@ -1,6 +1,9 @@
 package com.bookit.servicecalllogging.filter;
 
+import com.bookit.servicecalllogging.EnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.ResponseCodeExtractor;
+import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
+import com.bookit.servicecalllogging.extractor.JacksonEnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.extractor.JacksonResponseCodeExtractor;
 import com.bookit.servicecalllogging.resolver.DestinationNameResolver;
 import com.bookit.servicecalllogging.testsupport.RecordingCallLogger;
@@ -17,6 +20,8 @@ import org.springframework.web.reactive.function.client.WebClientRequestExceptio
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -177,5 +182,44 @@ class NonIntrusionWebClientTest {
 
         assertThat(body).isEqualTo(payload);
         assertThat(this.callLogger.onlyRecord().responseCode()).isNull();
+    }
+
+    // ---- the envelope matching engine fails ---------------------------------------------
+
+    private WebClient instrumentedWithEnvelope(EnvelopeFieldExtractor envelopeFieldExtractor) {
+        return builderWithRoomForLargeBodies()
+                .filter(new OutboundCallExchangeFilter(
+                        new DestinationNameResolver("my-service"), new JacksonResponseCodeExtractor(),
+                        this.callLogger, null, TestProperties.defaults(), envelopeFieldExtractor))
+                .build();
+    }
+
+    @Test
+    void anExplodingEnvelopeExtractorLosesOnlyTheMessageAndNeverTheCall() {
+        String payload = "{\"responseCode\":0,\"message\":\"OK\"}";
+        this.server.respondWith(200, payload);
+
+        String body = instrumentedWithEnvelope(bytes -> {
+            throw new IllegalStateException("envelope extractor exploded");
+        }).get().uri(this.server.url("/x")).retrieve().bodyToMono(String.class).block(TIMEOUT);
+
+        assertThat(body).isEqualTo(payload);
+        assertThat(this.callLogger.onlyRecord().responseCode()).isEqualTo(0);
+        assertThat(this.callLogger.onlyRecord().message()).isNull();
+    }
+
+    @Test
+    void aMalformedEnvelopeConfigurationStillInstrumentsAndNeverBreaksTheCall() {
+        String payload = "{\"responseCode\":0,\"message\":\"OK\"}";
+        this.server.respondWith(200, payload);
+
+        List<ServiceCallLoggingProperties.Envelope> malformed = Arrays.asList(
+                null, new ServiceCallLoggingProperties.Envelope("   ", "  ", 0));
+
+        String body = instrumentedWithEnvelope(new JacksonEnvelopeFieldExtractor(malformed))
+                .get().uri(this.server.url("/x")).retrieve().bodyToMono(String.class).block(TIMEOUT);
+
+        assertThat(body).isEqualTo(payload);
+        assertThat(this.callLogger.onlyRecord().responseCode()).isEqualTo(0);
     }
 }
