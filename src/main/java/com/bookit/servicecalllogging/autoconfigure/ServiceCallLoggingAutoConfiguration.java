@@ -1,7 +1,9 @@
 package com.bookit.servicecalllogging.autoconfigure;
 
+import com.bookit.servicecalllogging.EnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.ResponseCodeExtractor;
 import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
+import com.bookit.servicecalllogging.extractor.JacksonEnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.extractor.JacksonResponseCodeExtractor;
 import com.bookit.servicecalllogging.logging.CallLogger;
 import com.bookit.servicecalllogging.metrics.OutboundCallMetrics;
@@ -72,8 +74,24 @@ public class ServiceCallLoggingAutoConfiguration {
     @Bean
     @ConditionalOnClass(name = "com.fasterxml.jackson.databind.ObjectMapper")
     @ConditionalOnMissingBean(ResponseCodeExtractor.class)
-    public ResponseCodeExtractor jacksonResponseCodeExtractor() {
-        return new JacksonResponseCodeExtractor();
+    public ResponseCodeExtractor jacksonResponseCodeExtractor(EnvelopeFieldExtractor envelopeFieldExtractor) {
+        return new JacksonResponseCodeExtractor(envelopeFieldExtractor);
+    }
+
+    /**
+     * The envelope matching engine (FR-004). Registered independently of
+     * {@link ResponseCodeExtractor}: a consumer who has replaced code extraction with their own
+     * bean still gets a message and still has their code classified against the matched
+     * combination's successful value (FR-016).
+     *
+     * <p>Guarded on Jackson exactly like the default extractor; without it, no message is read
+     * and the starter behaves as it did before this feature.
+     */
+    @Bean
+    @ConditionalOnClass(name = "com.fasterxml.jackson.databind.ObjectMapper")
+    @ConditionalOnMissingBean(EnvelopeFieldExtractor.class)
+    public EnvelopeFieldExtractor envelopeFieldExtractor(ServiceCallLoggingProperties properties) {
+        return new JacksonEnvelopeFieldExtractor(properties.envelopes());
     }
 
     /**

@@ -1,6 +1,9 @@
 package com.bookit.servicecalllogging.interceptor;
 
+import com.bookit.servicecalllogging.EnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.ResponseCodeExtractor;
+import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
+import com.bookit.servicecalllogging.extractor.JacksonEnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.extractor.JacksonResponseCodeExtractor;
 import com.bookit.servicecalllogging.logging.CallLogger;
 import com.bookit.servicecalllogging.logging.OutboundCallRecord;
@@ -16,6 +19,8 @@ import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -191,5 +196,51 @@ class NonIntrusionRestTemplateTest {
     void extractorContractIsHonouredByTheShippedDefault() {
         assertThat(new JacksonResponseCodeExtractor().extract("garbage".getBytes(StandardCharsets.UTF_8)))
                 .isEqualTo(Optional.empty());
+    }
+
+    // ---- 7. the envelope matching engine fails -----------------------------------------
+
+    @Test
+    void anExplodingEnvelopeExtractorLosesOnlyTheMessageAndNeverTheCall() {
+        String payload = "{\"responseCode\":0,\"message\":\"OK\"}";
+        this.server.respondWith(200, payload);
+        EnvelopeFieldExtractor exploding = bytes -> {
+            throw new IllegalStateException("envelope extractor exploded");
+        };
+
+        RestTemplate restTemplate = new RestTemplate();
+        restTemplate.getInterceptors().add(new OutboundCallInterceptor(
+                new DestinationNameResolver("my-service"), new JacksonResponseCodeExtractor(),
+                this.callLogger, null, TestProperties.defaults(), exploding));
+
+        String body = restTemplate.getForObject(this.server.url("/x"), String.class);
+
+        assertThat(body).isEqualTo(payload);
+        OutboundCallRecord record = this.callLogger.onlyRecord();
+        assertThat(record.responseCode()).isEqualTo(0);
+        assertThat(record.message()).isNull();
+    }
+
+    @Test
+    void aMalformedEnvelopeConfigurationStillInstrumentsAndNeverBreaksTheCall() {
+        String payload = "{\"responseCode\":0,\"message\":\"OK\"}";
+        this.server.respondWith(200, payload);
+
+        // a null entry and a blank-field entry are both tolerated
+        List<ServiceCallLoggingProperties.Envelope> malformed = Arrays.asList(
+                null, new ServiceCallLoggingProperties.Envelope("   ", "  ", 0));
+        EnvelopeFieldExtractor extractor = new JacksonEnvelopeFieldExtractor(malformed);
+
+        RestTemplate restTemplate = new RestTemplate();
+        restTemplate.getInterceptors().add(new OutboundCallInterceptor(
+                new DestinationNameResolver("my-service"), new JacksonResponseCodeExtractor(),
+                this.callLogger, null, TestProperties.defaults(), extractor));
+
+        assertThatCode(() -> {
+            String body = restTemplate.getForObject(this.server.url("/x"), String.class);
+            assertThat(body).isEqualTo(payload);
+        }).doesNotThrowAnyException();
+
+        assertThat(this.callLogger.onlyRecord().responseCode()).isEqualTo(0);
     }
 }

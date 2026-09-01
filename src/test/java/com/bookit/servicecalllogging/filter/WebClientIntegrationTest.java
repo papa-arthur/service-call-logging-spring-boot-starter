@@ -2,6 +2,7 @@ package com.bookit.servicecalllogging.filter;
 
 import com.bookit.servicecalllogging.autoconfigure.ServiceCallLoggingAutoConfiguration;
 import com.bookit.servicecalllogging.logging.CallLogger;
+import com.bookit.servicecalllogging.logging.OutboundCallRecord;
 import com.bookit.servicecalllogging.testsupport.RecordingCallLogger;
 import com.bookit.servicecalllogging.testsupport.StubHttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -129,5 +130,162 @@ class WebClientIntegrationTest {
         return webClient.get().uri(url)
                 .exchangeToMono(response -> response.bodyToMono(String.class).defaultIfEmpty(""))
                 .block(TIMEOUT);
+    }
+
+    // ================= User Story 1 — custom field-name pair =================
+
+    @Test
+    void aConfiguredFieldNamePairIsReadInsteadOfTheBuiltInDefaults() {
+        this.server.respondWith(200, "{\"statusCode\":0,\"message\":\"OK\"}");
+
+        this.runner.withPropertyValues(
+                        "service-call-logging.envelopes[0].code-field=statusCode",
+                        "service-call-logging.envelopes[0].message-field=message")
+                .run(context -> {
+                    context.getBean(WebClient.Builder.class).build()
+                            .get().uri(this.server.url("/x"))
+                            .retrieve().bodyToMono(String.class).block(TIMEOUT);
+
+                    OutboundCallRecord record = context.getBean(RecordingCallLogger.class).onlyRecord();
+                    assertThat(record.responseCode()).isZero();
+                    assertThat(record.message()).isEqualTo("OK");
+                });
+    }
+
+    @Test
+    void theBodyIsUnchangedWhenACustomCombinationIsConfigured() {
+        String payload = "{\"statusCode\":0,\"message\":\"OK\",\"items\":[1,2,3]}";
+        this.server.respondWith(200, payload);
+
+        this.runner.withPropertyValues("service-call-logging.envelopes[0].code-field=statusCode")
+                .run(context -> {
+                    String body = context.getBean(WebClient.Builder.class).build()
+                            .get().uri(this.server.url("/x"))
+                            .retrieve().bodyToMono(String.class).block(TIMEOUT);
+
+                    assertThat(body).isEqualTo(payload);
+                });
+    }
+
+    // ================= User Story 2 — configurable successful value =================
+
+    @Test
+    void aNonDefaultSuccessfulValueDecidesSuccessAndEveryOtherCodeIsUnsuccessful() {
+        this.runner.withPropertyValues(
+                        "service-call-logging.envelopes[0].code-field=responseCode",
+                        "service-call-logging.envelopes[0].successful-value=1")
+                .run(context -> {
+                    WebClient webClient = context.getBean(WebClient.Builder.class).build();
+                    RecordingCallLogger logger = context.getBean(RecordingCallLogger.class);
+
+                    this.server.respondWith(200, "{\"responseCode\":1}");
+                    readIgnoringStatus(webClient, this.server.url("/a"));
+                    assertThat(logger.onlyRecord().responseCode()).isEqualTo(1);
+                    logger.reset();
+
+                    this.server.respondWith(200, "{\"responseCode\":4711}");
+                    readIgnoringStatus(webClient, this.server.url("/b"));
+                    assertThat(logger.onlyRecord().responseCode()).isEqualTo(4711);
+                });
+    }
+
+    // ================= User Story 3 — several combinations at once =================
+
+    @Test
+    void eachCallIsInterpretedByTheCombinationMatchingItsOwnBody() {
+        this.runner.withPropertyValues(
+                        "service-call-logging.envelopes[0].code-field=statusCode",
+                        "service-call-logging.envelopes[0].message-field=message",
+                        "service-call-logging.envelopes[1].code-field=responseCode",
+                        "service-call-logging.envelopes[1].message-field=responseDescription",
+                        "service-call-logging.envelopes[1].successful-value=1")
+                .run(context -> {
+                    WebClient webClient = context.getBean(WebClient.Builder.class).build();
+                    RecordingCallLogger logger = context.getBean(RecordingCallLogger.class);
+
+                    this.server.respondWith(200, "{\"statusCode\":0,\"message\":\"first API\"}");
+                    readIgnoringStatus(webClient, this.server.url("/api-one"));
+                    assertThat(logger.onlyRecord().message()).isEqualTo("first API");
+                    logger.reset();
+
+                    this.server.respondWith(200,
+                            "{\"responseCode\":1,\"responseDescription\":\"second API\"}");
+                    readIgnoringStatus(webClient, this.server.url("/api-two"));
+                    assertThat(logger.onlyRecord().responseCode()).isEqualTo(1);
+                    assertThat(logger.onlyRecord().message()).isEqualTo("second API");
+                    logger.reset();
+
+                    this.server.respondWith(200, "{\"errorCode\":500}");
+                    readIgnoringStatus(webClient, this.server.url("/api-three"));
+                    assertThat(logger.onlyRecord().responseCode()).isNull();
+                    assertThat(logger.onlyRecord().message()).isNull();
+                });
+    }
+
+    @Test
+    void anAmbiguousBodyIsResolvedByTheEarlierConfiguredCombination() {
+        this.server.respondWith(200,
+                "{\"statusCode\":0,\"responseCode\":1,\"message\":\"first\",\"responseDescription\":\"second\"}");
+
+        this.runner.withPropertyValues(
+                        "service-call-logging.envelopes[0].code-field=statusCode",
+                        "service-call-logging.envelopes[0].message-field=message",
+                        "service-call-logging.envelopes[1].code-field=responseCode",
+                        "service-call-logging.envelopes[1].message-field=responseDescription")
+                .run(context -> {
+                    readIgnoringStatus(context.getBean(WebClient.Builder.class).build(),
+                            this.server.url("/x"));
+
+                    OutboundCallRecord record = context.getBean(RecordingCallLogger.class).onlyRecord();
+                    assertThat(record.responseCode()).isZero();
+                    assertThat(record.message()).isEqualTo("first");
+                });
+    }
+
+    // ================= User Story 4 — absent, partial and mismatched configuration ==========
+
+    @Test
+    void withNoEnvelopeConfiguredBehaviourIsIdenticalToBeforeTheFeature() {
+        this.server.respondWith(200, "{\"responseCode\":0,\"message\":\"OK\"}");
+
+        this.runner.run(context -> {
+            readIgnoringStatus(context.getBean(WebClient.Builder.class).build(), this.server.url("/x"));
+
+            OutboundCallRecord record = context.getBean(RecordingCallLogger.class).onlyRecord();
+            assertThat(record.responseCode()).isZero();
+            assertThat(record.message()).isEqualTo("OK");
+        });
+    }
+
+    @Test
+    void aPartiallyConfiguredCombinationFallsBackPerFieldToTheDefaults() {
+        this.server.respondWith(200, "{\"statusCode\":0,\"message\":\"OK\"}");
+
+        this.runner.withPropertyValues("service-call-logging.envelopes[0].code-field=statusCode")
+                .run(context -> {
+                    readIgnoringStatus(context.getBean(WebClient.Builder.class).build(),
+                            this.server.url("/x"));
+
+                    OutboundCallRecord record = context.getBean(RecordingCallLogger.class).onlyRecord();
+                    assertThat(record.responseCode()).isZero();
+                    assertThat(record.message()).isEqualTo("OK");
+                });
+    }
+
+    @Test
+    void aBodyMatchingNoCombinationAtAllIsRecordedAsAbsentAndDeliveredIntact() {
+        String payload = "{\"errorCode\":500,\"detail\":\"boom\"}";
+        this.server.respondWith(200, payload);
+
+        this.runner.withPropertyValues("service-call-logging.envelopes[0].code-field=statusCode")
+                .run(context -> {
+                    String body = readIgnoringStatus(context.getBean(WebClient.Builder.class).build(),
+                            this.server.url("/x"));
+
+                    OutboundCallRecord record = context.getBean(RecordingCallLogger.class).onlyRecord();
+                    assertThat(record.responseCode()).isNull();
+                    assertThat(record.message()).isNull();
+                    assertThat(body).isEqualTo(payload);
+                });
     }
 }

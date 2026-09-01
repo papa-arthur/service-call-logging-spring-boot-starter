@@ -1,5 +1,6 @@
 package com.bookit.servicecalllogging;
 
+import com.bookit.servicecalllogging.extractor.JacksonEnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.extractor.JacksonResponseCodeExtractor;
 import com.bookit.servicecalllogging.interceptor.OutboundCallInterceptor;
 import com.bookit.servicecalllogging.logging.CallLogger;
@@ -17,6 +18,7 @@ import org.springframework.mock.http.client.MockClientHttpRequest;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /**
  * Measures the per-call instrumentation cost that Constitution Principle VI requires the README
@@ -61,23 +63,45 @@ class OverheadBenchmark {
 
     private static void report() throws Exception {
         long baseline = measure(null);
-        long instrumented = measure(interceptor());
+        long defaultConfig = measure(interceptor(List.of()));
+        long threeCombinations = measure(interceptor(List.of(
+                // the matching combination is deliberately last: worst case for the list walk
+                new ServiceCallLoggingProperties.Envelope("statusCode", "message", 0),
+                new ServiceCallLoggingProperties.Envelope("code", "detail", 0),
+                new ServiceCallLoggingProperties.Envelope("responseCode", "message", 0))));
 
-        long overheadNanos = (instrumented - baseline) / ITERATIONS;
         System.out.printf("%n=== per-call instrumentation overhead (blocking path) ===%n");
-        System.out.printf("baseline    : %6.2f us/call%n", baseline / (double) ITERATIONS / 1000);
-        System.out.printf("instrumented: %6.2f us/call%n", instrumented / (double) ITERATIONS / 1000);
-        System.out.printf("overhead    : %6d ns/call (%.2f us)%n", overheadNanos, overheadNanos / 1000.0);
-        System.out.printf("body size   : %d bytes%n%n", SMALL_BODY.length);
+        System.out.printf("baseline                       : %6.2f us/call%n", perCallMicros(baseline));
+        System.out.printf("instrumented, no envelopes     : %6.2f us/call%n", perCallMicros(defaultConfig));
+        System.out.printf("instrumented, 3 combinations   : %6.2f us/call%n", perCallMicros(threeCombinations));
+        System.out.printf("overhead, no envelopes         : %6d ns/call (%.2f us)%n",
+                overheadNanos(baseline, defaultConfig), overheadNanos(baseline, defaultConfig) / 1000.0);
+        System.out.printf("overhead, 3 combinations       : %6d ns/call (%.2f us)%n",
+                overheadNanos(baseline, threeCombinations),
+                overheadNanos(baseline, threeCombinations) / 1000.0);
+        System.out.printf("body size                      : %d bytes%n%n", SMALL_BODY.length);
     }
 
-    private static OutboundCallInterceptor interceptor() {
+    private static double perCallMicros(long totalNanos) {
+        return totalNanos / (double) ITERATIONS / 1000;
+    }
+
+    private static long overheadNanos(long baseline, long instrumented) {
+        return (instrumented - baseline) / ITERATIONS;
+    }
+
+    /**
+     * Wires the interceptor exactly as the auto-configuration does, including the envelope
+     * matching engine — so the figure reflects what a real consumer actually pays.
+     */
+    private static OutboundCallInterceptor interceptor(List<ServiceCallLoggingProperties.Envelope> envelopes) {
         return new OutboundCallInterceptor(
                 new DestinationNameResolver("bench-service"),
-                new JacksonResponseCodeExtractor(),
+                new JacksonResponseCodeExtractor(new JacksonEnvelopeFieldExtractor(envelopes)),
                 SILENT_LOGGER,
                 new OutboundCallMetrics(new SimpleMeterRegistry(), TestProperties.defaults()),
-                TestProperties.defaults());
+                TestProperties.defaults(),
+                new JacksonEnvelopeFieldExtractor(envelopes));
     }
 
     private static long measure(OutboundCallInterceptor interceptor) throws Exception {

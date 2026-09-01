@@ -1,5 +1,6 @@
 package com.bookit.servicecalllogging.interceptor;
 
+import com.bookit.servicecalllogging.EnvelopeFieldExtractor;
 import com.bookit.servicecalllogging.ResponseCodeExtractor;
 import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
 import com.bookit.servicecalllogging.logging.CallLogger;
@@ -40,6 +41,7 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
     private final CallLogger callLogger;
     private final OutboundCallMetrics outboundCallMetrics;
     private final ServiceCallLoggingProperties properties;
+    private final EnvelopeFieldExtractor envelopeFieldExtractor;
 
     /**
      * Creates an interceptor that logs but records no metrics — the shape used when the
@@ -61,11 +63,26 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
                                    CallLogger callLogger,
                                    OutboundCallMetrics outboundCallMetrics,
                                    ServiceCallLoggingProperties properties) {
+        this(destinationNameResolver, responseCodeExtractor, callLogger, outboundCallMetrics,
+                properties, null);
+    }
+
+    /**
+     * @param envelopeFieldExtractor the envelope matching engine used for the message and the
+     *                               applicable successful value, or null when Jackson is absent
+     */
+    public OutboundCallInterceptor(DestinationNameResolver destinationNameResolver,
+                                   ResponseCodeExtractor responseCodeExtractor,
+                                   CallLogger callLogger,
+                                   OutboundCallMetrics outboundCallMetrics,
+                                   ServiceCallLoggingProperties properties,
+                                   EnvelopeFieldExtractor envelopeFieldExtractor) {
         this.destinationNameResolver = destinationNameResolver;
         this.responseCodeExtractor = responseCodeExtractor;
         this.callLogger = callLogger;
         this.outboundCallMetrics = outboundCallMetrics;
         this.properties = properties;
+        this.envelopeFieldExtractor = envelopeFieldExtractor;
     }
 
     @Override
@@ -100,10 +117,11 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
             String statusGroup = HttpStatusGroup.classify(statusCode);
 
             buffered = new BufferingClientHttpResponse(rawResponse, this.properties.maxBodyBytes());
-            ResponseCodeResult result = buffered.peek(this.responseCodeExtractor);
+            ResponseCodeResult result =
+                    buffered.peek(this.responseCodeExtractor, this.envelopeFieldExtractor);
 
             safeLog(new OutboundCallRecord(source, destination, httpMethod, statusCode,
-                    statusGroup, result.rawCode(), startedAt));
+                    statusGroup, result.rawCode(), buffered.peekedMessage(), startedAt));
             safeRecordMetrics(destination, result.outcome(), statusGroup);
 
             return buffered;
@@ -117,7 +135,7 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
 
     private void recordNetworkError(String source, String destination, String httpMethod, Instant startedAt) {
         safeLog(new OutboundCallRecord(source, destination, httpMethod, null,
-                HttpStatusGroup.NETWORK_ERROR, null, startedAt));
+                HttpStatusGroup.NETWORK_ERROR, null, null, startedAt));
         safeRecordMetrics(destination, Outcome.ABSENT, HttpStatusGroup.NETWORK_ERROR);
     }
 

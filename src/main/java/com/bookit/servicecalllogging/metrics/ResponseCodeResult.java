@@ -17,10 +17,16 @@ public record ResponseCodeResult(Outcome outcome, Integer rawCode) {
     /**
      * Builds a result from a successfully extracted code.
      *
-     * @param rawCode the extracted value; {@code 0} maps to {@link Outcome#SUCCESS}, every
-     *                other value maps to {@link Outcome#FAILURE}
+     * <p>Only the single successful value is privileged: every other value the code field can
+     * hold — including one the starter has never seen before — is a valid unsuccessful outcome,
+     * never "absent" or "unrecognised" (FR-009).
+     *
+     * @param rawCode         the extracted value, logged as-is whatever it is
+     * @param successfulValue the applicable combination's successful value; {@code rawCode}
+     *                        equal to it maps to {@link Outcome#SUCCESS}, everything else to
+     *                        {@link Outcome#FAILURE}
      */
-    public static ResponseCodeResult of(int rawCode) {
-        return new ResponseCodeResult(rawCode == 0 ? Outcome.SUCCESS : Outcome.FAILURE, rawCode);
+    public static ResponseCodeResult of(int rawCode, int successfulValue) {
+        return new ResponseCodeResult(rawCode == successfulValue ? Outcome.SUCCESS : Outcome.FAILURE, rawCode);
     }
 }

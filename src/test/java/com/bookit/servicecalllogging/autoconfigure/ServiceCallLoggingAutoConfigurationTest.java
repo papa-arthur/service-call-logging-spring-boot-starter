@@ -1,5 +1,7 @@
 package com.bookit.servicecalllogging.autoconfigure;
 
+import com.bookit.servicecalllogging.EnvelopeFieldExtractor;
+import com.bookit.servicecalllogging.EnvelopeMatch;
 import com.bookit.servicecalllogging.ResponseCodeExtractor;
 import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
 import com.bookit.servicecalllogging.extractor.JacksonResponseCodeExtractor;
@@ -32,6 +34,7 @@ class ServiceCallLoggingAutoConfigurationTest {
             assertThat(context).hasSingleBean(DestinationNameResolver.class);
             assertThat(context).hasSingleBean(CallLogger.class);
             assertThat(context).hasSingleBean(ResponseCodeExtractor.class);
+            assertThat(context).hasSingleBean(EnvelopeFieldExtractor.class);
             assertThat(context).hasSingleBean(OutboundCallInterceptor.class);
             assertThat(context).hasSingleBean(OutboundCallExchangeFilter.class);
             assertThat(context).hasBean("serviceCallLoggingRestTemplateCustomizer");
@@ -62,6 +65,7 @@ class ServiceCallLoggingAutoConfigurationTest {
             assertThat(context).doesNotHaveBean(DestinationNameResolver.class);
             assertThat(context).doesNotHaveBean(CallLogger.class);
             assertThat(context).doesNotHaveBean(ResponseCodeExtractor.class);
+            assertThat(context).doesNotHaveBean(EnvelopeFieldExtractor.class);
             assertThat(context).doesNotHaveBean(OutboundCallInterceptor.class);
             assertThat(context).doesNotHaveBean(OutboundCallExchangeFilter.class);
         });
@@ -87,6 +91,7 @@ class ServiceCallLoggingAutoConfigurationTest {
         this.runner.withClassLoader(new FilteredClassLoader(ObjectMapper.class)).run(context -> {
             assertThat(context).hasNotFailed();
             assertThat(context).doesNotHaveBean(ResponseCodeExtractor.class);
+            assertThat(context).doesNotHaveBean(EnvelopeFieldExtractor.class);
             // the instrumentation beans still exist; they simply report responseCode=absent
             assertThat(context).hasSingleBean(OutboundCallInterceptor.class);
             assertThat(context).hasSingleBean(OutboundCallExchangeFilter.class);
@@ -130,5 +135,53 @@ class ServiceCallLoggingAutoConfigurationTest {
         CallLogger myLogger() {
             return new CallLogger();
         }
+    }
+
+    @Test
+    void theEnvelopeFieldExtractorIsNotRegisteredWhenJacksonIsAbsent() {
+        this.runner.withClassLoader(new FilteredClassLoader(ObjectMapper.class)).run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).doesNotHaveBean(EnvelopeFieldExtractor.class);
+            // ...and the rest of the starter still comes up, per Principle II
+            assertThat(context).hasSingleBean(CallLogger.class);
+            assertThat(context).hasSingleBean(OutboundCallInterceptor.class);
+        });
+    }
+
+    @Test
+    void aConsumerEnvelopeFieldExtractorReplacesTheStarterOne() {
+        EnvelopeFieldExtractor custom = bytes -> EnvelopeMatch.NONE;
+
+        this.runner.withBean(EnvelopeFieldExtractor.class, () -> custom).run(context -> {
+            assertThat(context).hasSingleBean(EnvelopeFieldExtractor.class);
+            assertThat(context.getBean(EnvelopeFieldExtractor.class)).isSameAs(custom);
+        });
+    }
+
+    @Test
+    void theEnvelopeFieldExtractorIsStillRegisteredWhenAConsumerOverridesTheResponseCodeExtractor() {
+        // FR-016: message extraction is independent of who supplies the code
+        ResponseCodeExtractor customCode = bytes -> java.util.Optional.of(0);
+
+        this.runner.withBean(ResponseCodeExtractor.class, () -> customCode).run(context -> {
+            assertThat(context.getBean(ResponseCodeExtractor.class)).isSameAs(customCode);
+            assertThat(context).doesNotHaveBean(JacksonResponseCodeExtractor.class);
+            assertThat(context).hasSingleBean(EnvelopeFieldExtractor.class);
+        });
+    }
+
+    @Test
+    void aConfiguredEnvelopeListReachesTheExtractorBean() {
+        this.runner.withPropertyValues(
+                        "service-call-logging.envelopes[0].code-field=statusCode",
+                        "service-call-logging.envelopes[0].message-field=detail")
+                .run(context -> {
+                    EnvelopeMatch match = context.getBean(EnvelopeFieldExtractor.class)
+                            .extract("{\"statusCode\":4,\"detail\":\"nope\"}"
+                                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+                    assertThat(match.rawCode()).isEqualTo(4);
+                    assertThat(match.message()).isEqualTo("nope");
+                });
     }
 }

@@ -1,36 +1,27 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: N/A (no prior version) → 1.0.0 (initial ratification)
+Version change: 1.0.0 → 1.1.0
 
-Principles added (10 — all new):
-  I.   Non-Intrusion (Do No Harm)
-  II.  Zero Forced Footprint
-  III. Auto-Configured, Fully Overridable
-  IV.  Backward Compatibility & Semantic Versioning
-  V.   Test-First (TDD)
-  VI.  Graceful Degradation & Bounded Cost
-  VII. Data Hygiene & Security
-  VIII.Documentation as a Deliverable
-  IX.  Spec-Driven Traceability
-  X.   Simplicity / YAGNI
+Principles modified:
+  VII. Data Hygiene & Security — Rule expanded: the fixed, exhaustive logged-field set now
+       additionally permits an extracted business-outcome message/description string, logged
+       verbatim with no length bound or content filtering, but only when a consuming service has
+       configured or defaulted into message-field extraction. Rationale expanded to explain why
+       this field is treated differently from a raw request/response body. Verification
+       paragraph updated so the ArchUnit-permitted field set includes the new field.
 
-Sections added:
-  - Core Principles (10 principles, all non-negotiable)
-  - Additional Constraints & Quality Gates
-  - Development Workflow
-  - Governance
+Principles added: None.
+Principles removed: None.
 
-Sections removed: None (initial ratification).
+Sections added: None.
+Sections removed: None.
 
-Dependent templates requiring update to reference constitution gates:
-  - plan-template: Add mandatory "Constitution Check" step (pre- and post-design pass);
-    add "Complexity Tracking" section referencing Principle X (YAGNI); reference
-    Non-Intrusion Gate (Principle I) and TDD Gate (Principle V) as review checkpoints.
-  - spec-template: Add gate annotation: no [NEEDS CLARIFICATION] marker may remain
-    unresolved at PR open time (Additional Constraints & Quality Gates).
-  - tasks-template: Add TDD gate annotation (Principle V, Red-Green-Refactor order
-    enforced); add Non-Intrusion regression task annotation (Principle I merge gate).
+Follow-up required (tracked outside this document, not template changes):
+  - `DataHygieneArchTest` (src/test/java/.../security/DataHygieneArchTest.java) MUST be updated
+    to permit the new logged field name before the change that relies on this amendment merges.
+  - This amendment was drafted to unblock `specs/002-configurable-envelope-fields/` (FR-013),
+    whose plan.md flagged the prior wording as a blocking Constitution Check gate.
 
 Deferred TODOs: None — all placeholder tokens resolved.
 -->
@@ -178,20 +169,32 @@ caller.
 
 **Rule**: The starter MUST NOT log credentials, tokens, `Authorization` header values, `Cookie`
 header values, PII, full request bodies, or full response bodies. The complete set of fields
-that MAY be emitted is fixed and exhaustive: the source/destination correlation header values
-and the parsed `responseCode` integer. The set of logged fields MUST be documented in the
-project README. Nothing MAY be logged that a consumer has not been explicitly told to expect.
+that MAY be emitted is fixed and exhaustive: the source/destination correlation header values,
+the parsed `responseCode` integer, and — only when a consuming service has configured or
+defaulted into response-message extraction — the extracted business-outcome message/description
+string, logged verbatim with no length bound or content filtering. The set of logged fields MUST
+be documented in the project README. Nothing MAY be logged that a consumer has not been
+explicitly told to expect.
 
 **Rationale**: This starter runs inside services that handle sensitive business and user data
 across many independent teams. Accidental credential or PII leakage through a shared library
 constitutes a security incident affecting every adopting service. The log surface must be locked
-down by design and verified by automated check, not left to convention or vigilance.
+down by design and verified by automated check, not left to convention or vigilance. The
+extracted message is treated differently from a raw request/response body: it is a single,
+adopter-named field carrying the downstream API's own business-outcome description (for example,
+"insufficient funds" or "invalid account number") — the intended semantic payload of the
+integration, not incidental sensitive data. A consuming service that configures or accepts the
+default for message extraction is making a deliberate, informed choice about a field it expects
+and understands from an API it has chosen to call; a service that configures nothing continues
+to log no message at all, exactly as before this exception was introduced. This is a narrower
+exception than it may first appear: it does not relax the prohibition on credentials, tokens,
+`Authorization`/`Cookie` values, PII, or full bodies, all of which remain absolute.
 
 **Verification**: A static analysis rule (ArchUnit or equivalent) MUST assert that no log
 statement in the instrumentation path references field names outside the declared set
-(correlation header names and `responseCode`). A dedicated integration test MUST assert that a
-request carrying an `Authorization` header produces no log output containing the string
-"Authorization" or any substring of the header value.
+(correlation header names, `responseCode`, and the extracted message field). A dedicated
+integration test MUST assert that a request carrying an `Authorization` header produces no log
+output containing the string "Authorization" or any substring of the header value.
 
 ---
 
@@ -355,4 +358,4 @@ violation MUST be either: (a) explicitly justified in the plan's complexity-trac
 and accepted by a maintainer before the PR is opened; or (b) rejected at code review without
 exception. Unjustified violations are merge blockers, not warnings.
 
-**Version**: 1.0.0 | **Ratified**: 2026-08-27 | **Last Amended**: 2026-08-27
+**Version**: 1.1.0 | **Ratified**: 2026-08-27 | **Last Amended**: 2026-09-01

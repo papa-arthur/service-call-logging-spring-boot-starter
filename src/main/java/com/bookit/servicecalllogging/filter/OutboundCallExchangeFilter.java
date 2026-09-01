@@ -1,5 +1,7 @@
 package com.bookit.servicecalllogging.filter;
 
+import com.bookit.servicecalllogging.EnvelopeFieldExtractor;
+import com.bookit.servicecalllogging.EnvelopeMatch;
 import com.bookit.servicecalllogging.ResponseCodeExtractor;
 import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
 import com.bookit.servicecalllogging.interceptor.HttpStatusGroup;
@@ -49,6 +51,7 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
     private final CallLogger callLogger;
     private final OutboundCallMetrics outboundCallMetrics;
     private final ServiceCallLoggingProperties properties;
+    private final EnvelopeFieldExtractor envelopeFieldExtractor;
 
     /**
      * Creates a filter that logs but records no metrics — the shape used when the consumer has
@@ -70,11 +73,26 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
                                       CallLogger callLogger,
                                       OutboundCallMetrics outboundCallMetrics,
                                       ServiceCallLoggingProperties properties) {
+        this(destinationNameResolver, responseCodeExtractor, callLogger, outboundCallMetrics,
+                properties, null);
+    }
+
+    /**
+     * @param envelopeFieldExtractor the envelope matching engine used for the message and the
+     *                               applicable successful value, or null when Jackson is absent
+     */
+    public OutboundCallExchangeFilter(DestinationNameResolver destinationNameResolver,
+                                      ResponseCodeExtractor responseCodeExtractor,
+                                      CallLogger callLogger,
+                                      OutboundCallMetrics outboundCallMetrics,
+                                      ServiceCallLoggingProperties properties,
+                                      EnvelopeFieldExtractor envelopeFieldExtractor) {
         this.destinationNameResolver = destinationNameResolver;
         this.responseCodeExtractor = responseCodeExtractor;
         this.callLogger = callLogger;
         this.outboundCallMetrics = outboundCallMetrics;
         this.properties = properties;
+        this.envelopeFieldExtractor = envelopeFieldExtractor;
     }
 
     @Override
@@ -103,7 +121,7 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
                 .flatMap(response -> instrument(response, source, resolvedDestination, httpMethod, startedAt))
                 .onErrorResume(transportFailure -> {
                     safeLog(new OutboundCallRecord(source, resolvedDestination, httpMethod, null,
-                            HttpStatusGroup.NETWORK_ERROR, null, startedAt));
+                            HttpStatusGroup.NETWORK_ERROR, null, null, startedAt));
                     safeRecordMetrics(resolvedDestination, Outcome.ABSENT, HttpStatusGroup.NETWORK_ERROR);
                     // The business call must still fail exactly as it would have.
                     return Mono.error(transportFailure);
@@ -126,17 +144,18 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
             return Mono.just(response);
         }
 
-        Mono<ResponseCodeResult> parsed = cachedBody
+        Mono<Interpreted> parsed = cachedBody
                 .reduceWith(() -> new BoundedBodyPrefix(cap), BoundedBodyPrefix::append)
                 .map(this::interpret)
-                .defaultIfEmpty(ResponseCodeResult.ABSENT)
-                .onErrorReturn(ResponseCodeResult.ABSENT);
+                .defaultIfEmpty(Interpreted.ABSENT)
+                .onErrorReturn(Interpreted.ABSENT);
 
         return parsed
-                .doOnNext(result -> {
+                .doOnNext(interpreted -> {
                     safeLog(new OutboundCallRecord(source, destination, httpMethod,
-                            statusCode, statusGroup, result.rawCode(), startedAt));
-                    safeRecordMetrics(destination, result.outcome(), statusGroup);
+                            statusCode, statusGroup, interpreted.result().rawCode(),
+                            interpreted.message(), startedAt));
+                    safeRecordMetrics(destination, interpreted.result().outcome(), statusGroup);
                 })
                 .then(Mono.fromCallable(() -> response.mutate().body(cachedBody).build()))
                 .onErrorResume(instrumentationFailure -> {
@@ -145,21 +164,49 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
                 });
     }
 
-    private ResponseCodeResult interpret(BoundedBodyPrefix prefix) {
+    private Interpreted interpret(BoundedBodyPrefix prefix) {
         if (prefix.overflowed()) {
-            // FR-013: past the cap we do not parse at all.
-            return ResponseCodeResult.ABSENT;
+            // FR-013 (spec 001): past the cap we do not parse at all.
+            return Interpreted.ABSENT;
         }
+        byte[] bytes = prefix.bytes();
+        EnvelopeMatch match = safeMatch(bytes);
         try {
-            Optional<Integer> code = this.responseCodeExtractor.extract(prefix.bytes());
+            Optional<Integer> code = this.responseCodeExtractor.extract(bytes);
             if (code == null || code.isEmpty()) {
-                return ResponseCodeResult.ABSENT;
+                return new Interpreted(ResponseCodeResult.ABSENT, match.message());
             }
-            return ResponseCodeResult.of(code.get());
+            return new Interpreted(ResponseCodeResult.of(code.get(), match.successfulValue()),
+                    match.message());
         } catch (Exception extractorFailure) {
             // The caller's buffers were never touched — only telemetry is lost.
-            return ResponseCodeResult.ABSENT;
+            return new Interpreted(ResponseCodeResult.ABSENT, match.message());
         }
+    }
+
+    /**
+     * Runs the envelope matching engine under its own guard: a failure here costs the message
+     * and the configured successful value, never the call (Constitution Principle I).
+     */
+    private EnvelopeMatch safeMatch(byte[] bytes) {
+        if (this.envelopeFieldExtractor == null) {
+            return EnvelopeMatch.NONE;
+        }
+        try {
+            EnvelopeMatch match = this.envelopeFieldExtractor.extract(bytes);
+            return match == null ? EnvelopeMatch.NONE : match;
+        } catch (Exception envelopeFailure) {
+            return EnvelopeMatch.NONE;
+        }
+    }
+
+    /**
+     * The two independently-determined halves of a call's business outcome: the classified code
+     * and the message.
+     */
+    private record Interpreted(ResponseCodeResult result, String message) {
+
+        static final Interpreted ABSENT = new Interpreted(ResponseCodeResult.ABSENT, null);
     }
 
     /** Emits the log entry, absorbing any failure: telemetry is best-effort, the call is not. */

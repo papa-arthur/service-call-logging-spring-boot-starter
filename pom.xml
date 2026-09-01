@@ -13,7 +13,7 @@
 
     <groupId>com.bookit</groupId>
     <artifactId>service-call-logging-spring-boot-starter</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.0</version>
     <packaging>jar</packaging>
 
     <name>Service Call Logging Spring Boot Starter</name>
