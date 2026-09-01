@@ -222,6 +222,47 @@ class MetricsIntegrationTest {
                 });
     }
 
+    @Test
+    void theReactivePathHonoursTheConfiguredSuccessfulValueToo() {
+        // Reactive parity for FR-014. The blocking equivalent is
+        // aConfiguredSuccessfulValueDrivesTheSuccessAndFailureCounters; without this test the
+        // reactive path could classify against a hard-coded 0 and every existing assertion
+        // (which only checks raw responseCode values) would still pass.
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        org.springframework.boot.autoconfigure.web.reactive.function.client
+                                .WebClientAutoConfiguration.class,
+                        ServiceCallLoggingAutoConfiguration.class))
+                .withUserConfiguration(PrometheusRegistryConfig.class)
+                .withPropertyValues("spring.application.name=my-service",
+                        "service-call-logging.envelopes[0].code-field=responseCode",
+                        "service-call-logging.envelopes[0].successful-value=1")
+                .run(context -> {
+                    org.springframework.web.reactive.function.client.WebClient webClient =
+                            context.getBean(org.springframework.web.reactive.function.client
+                                    .WebClient.Builder.class).build();
+                    String destination = "127.0.0.1:" + this.server.port();
+
+                    // Deliberately ASYMMETRIC: two calls at the configured success value, one
+                    // below it. Equal counts would still match if the classification were merely
+                    // inverted, so the asymmetry is what gives this assertion its teeth.
+                    this.server.respondWith(200, "{\"responseCode\":1}");
+                    for (String path : new String[]{"/a", "/b"}) {
+                        webClient.get().uri(this.server.url(path)).retrieve()
+                                .bodyToMono(String.class).block(java.time.Duration.ofSeconds(20));
+                    }
+
+                    // 0 is no longer success under this combination
+                    this.server.respondWith(200, "{\"responseCode\":0}");
+                    webClient.get().uri(this.server.url("/c")).retrieve()
+                            .bodyToMono(String.class).block(java.time.Duration.ofSeconds(20));
+
+                    MeterRegistry registry = context.getBean(MeterRegistry.class);
+                    assertThat(count(registry, destination, "success", "2xx")).isEqualTo(2.0);
+                    assertThat(count(registry, destination, "failure", "2xx")).isEqualTo(1.0);
+                });
+    }
+
     // ================= User Story 2 / 3 — configured classification reaches the counters ======
 
     @Test
@@ -233,14 +274,17 @@ class MetricsIntegrationTest {
                     RestTemplate restTemplate = lenient(context.getBean(RestTemplateBuilder.class));
                     MeterRegistry registry = context.getBean(MeterRegistry.class);
 
+                    // Asymmetric for the same reason as the reactive test below: equal counts
+                    // cannot distinguish correct classification from inverted classification.
                     this.server.respondWith(200, "{\"responseCode\":1}");
                     restTemplate.getForObject(this.server.url("/a"), String.class);
-
-                    this.server.respondWith(200, "{\"responseCode\":0}");
                     restTemplate.getForObject(this.server.url("/b"), String.class);
 
+                    this.server.respondWith(200, "{\"responseCode\":0}");
+                    restTemplate.getForObject(this.server.url("/c"), String.class);
+
                     String destination = "127.0.0.1:" + this.server.port();
-                    assertThat(counter(registry, destination, "success", "2xx")).isEqualTo(1.0);
+                    assertThat(counter(registry, destination, "success", "2xx")).isEqualTo(2.0);
                     assertThat(counter(registry, destination, "failure", "2xx")).isEqualTo(1.0);
                 });
     }

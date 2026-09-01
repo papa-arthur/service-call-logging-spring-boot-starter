@@ -185,8 +185,10 @@ adopter-named field carrying the downstream API's own business-outcome descripti
 "insufficient funds" or "invalid account number") — the intended semantic payload of the
 integration, not incidental sensitive data. A consuming service that configures or accepts the
 default for message extraction is making a deliberate, informed choice about a field it expects
-and understands from an API it has chosen to call; a service that configures nothing continues
-to log no message at all, exactly as before this exception was introduced. This is a narrower
+and understands from an API it has chosen to call. A service that configures nothing still reads
+the message from the default field name (`message`) and logs it, since that default is part of the
+built-in combination — the exception is therefore live for every adopter, not only those who
+configure a combination explicitly, and is accepted on that basis. This is a narrower
 exception than it may first appear: it does not relax the prohibition on credentials, tokens,
 `Authorization`/`Cookie` values, PII, or full bodies, all of which remain absolute.
 

@@ -17,6 +17,11 @@ package com.bookit.servicecalllogging;
  * <p><strong>Implementations MUST never throw</strong> — return {@link EnvelopeMatch#NONE} for
  * anything that cannot be interpreted. An exception escaping here would reach the instrumentation
  * path on every call (Constitution Principle I).
+ *
+ * <p><strong>Implementations MUST treat {@code bodyBytes} as read-only.</strong> The array is the
+ * same one that backs the response body handed to the business caller — mutating it would corrupt
+ * what the caller reads, which is precisely the harm Principle I forbids. This mirrors contract
+ * rule 5 of {@link ResponseCodeExtractor}, which receives the same shared array.
  */
 @FunctionalInterface
 public interface EnvelopeFieldExtractor {
