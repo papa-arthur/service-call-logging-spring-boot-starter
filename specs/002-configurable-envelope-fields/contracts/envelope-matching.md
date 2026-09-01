@@ -22,7 +22,11 @@ To determine the combination that applies to one call's response body:
 1. Walk the ordered list from the first configured entry to the built-in default, in order.
 2. For each entry, look up its `codeField` name as a top-level field of the response body's JSON
    object.
-3. The **first** entry whose `codeField` is present and holds a JSON number is the match.
+3. The **first** entry whose `codeField` is present and holds a JSON **integer** is the match.
+   Integer specifically, not any JSON number: the starter has always required an integer code, and
+   FR-015 requires unconfigured behaviour to stay identical. A code field holding `1.5`, or a value
+   beyond 32-bit range, does not match — the walk continues to the next entry, exactly as if the
+   field were absent.
 4. If no entry — including the built-in default — matches, the call's code is `absent`
    (FR-010) and its message is also `absent`, because the default's own `messageField` is looked
    up against the same non-matching body.

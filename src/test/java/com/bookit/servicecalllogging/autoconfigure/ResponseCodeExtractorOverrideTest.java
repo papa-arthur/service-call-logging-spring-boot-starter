@@ -106,6 +106,15 @@ class ResponseCodeExtractorOverrideTest {
         });
     }
 
+    /** Adds a registry to the nested-extractor setup so outcome classification is observable. */
+    @Configuration(proxyBeanMethods = false)
+    static class NestedExtractorWithMetricsConfig extends NestedExtractorConfig {
+        @Bean
+        io.micrometer.core.instrument.MeterRegistry meterRegistry() {
+            return new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        }
+    }
+
     @Configuration(proxyBeanMethods = false)
     static class RecordingLoggerOnlyConfig {
         @Bean
@@ -132,10 +141,13 @@ class ResponseCodeExtractorOverrideTest {
 
     @Test
     void aConsumerExtractorIsClassifiedAgainstTheConfiguredSuccessfulValue() {
-        // The custom bean returns 1; a configured combination says 1 means success.
-        this.server.respondWith(200, "{\"data\":{\"responseCode\":1},\"responseCode\":1,\"message\":\"OK\"}");
+        // The two sources deliberately disagree: the custom bean reads data.responseCode (=1),
+        // while the starter's own matching would read the top-level responseCode (=7). Asserting 1
+        // therefore proves the consumer's bean supplied the code — an assertion of 1 against a body
+        // where both sources agree would prove nothing.
+        this.server.respondWith(200, "{\"data\":{\"responseCode\":1},\"responseCode\":7,\"message\":\"OK\"}");
 
-        this.runner.withUserConfiguration(NestedExtractorConfig.class)
+        this.runner.withUserConfiguration(NestedExtractorWithMetricsConfig.class)
                 .withPropertyValues(
                         "service-call-logging.envelopes[0].code-field=responseCode",
                         "service-call-logging.envelopes[0].successful-value=1")
@@ -144,7 +156,17 @@ class ResponseCodeExtractorOverrideTest {
                             .getForObject(this.server.url("/x"), String.class);
 
                     assertThat(context.getBean(RecordingCallLogger.class).onlyRecord().responseCode())
+                            .as("the consumer's extractor, not the starter's field matching, supplies the code")
                             .isEqualTo(1);
+
+                    // FR-016: that consumer-supplied code is classified against the MATCHED
+                    // combination's successful value (1), not the built-in default (0). Without
+                    // this the call would be counted a failure.
+                    io.micrometer.core.instrument.Counter success =
+                            context.getBean(io.micrometer.core.instrument.MeterRegistry.class)
+                                    .find("http.outbound.calls.total").tag("outcome", "success").counter();
+                    assertThat(success).isNotNull();
+                    assertThat(success.count()).isEqualTo(1.0);
                 });
     }
 }
