@@ -8,10 +8,15 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Constitution Principle VII (Data Hygiene) bounds this class absolutely: the only values
  * it may ever emit are the fields of {@link OutboundCallRecord} — source, destination, method,
- * HTTP status, status group, the parsed {@code responseCode}, and the business message (admitted
- * to the fixed field set by constitution v1.1.0; logged verbatim, with no length bound). It must never reference a
- * header bag, a request or response body, or any credential. {@code DataHygieneArchTest}
- * enforces this statically.
+ * HTTP status, status group, the parsed {@code responseCode}, the business message (admitted to
+ * the fixed field set by constitution v1.1.0; logged verbatim, with no length bound), and the
+ * destination URI path, inbound URI path and business operation (admitted by v1.2.0). It must
+ * never reference a header bag, a request or response body, or any credential.
+ * {@code DataHygieneArchTest} enforces this statically.
+
+ * <p>The two URI fields are path components only, so a credential in a URI's userinfo or a token
+ * in its query string is not representable here — the guarantee is structural, not a redaction
+ * step (see {@code UriDataHygieneTest}).
  *
  * <p>Override by declaring your own {@code CallLogger} bean to change the log format.
  */
@@ -23,17 +28,50 @@ public class CallLogger {
     private static final String NONE = "none";
 
     /**
-     * Logs one completed call at INFO. Callers must never let a failure here reach the
-     * business call; the instrumentation path wraps this invocation.
+     * Logs the request at INFO, immediately before it is dispatched (spec 003, FR-031).
      *
-     * @param record the call to log; never null
+     * <p>This entry is why the single combined entry was split. Previously a call that hung until
+     * the caller timed out left no trace of having been attempted; now the attempt is on record
+     * with its full context regardless of whether a response ever arrives.
+     *
+     * <p>Emits only what is known at send time — no status, no response code, no message, because
+     * none of them exist yet. A consumer subclassing {@code CallLogger} to change the format
+     * <strong>must override this method too</strong>, or no send-time entry is emitted at all; see
+     * the README's extension-point notes.
+     *
+     * @param record the call as known at send time; never null
+     */
+    public void logRequest(OutboundCallRecord record) {
+        log.info("outbound-request source={} destination={} method={} destinationUri={} "
+                        + "inboundUri={} operation={}",
+                record.source(),
+                record.destination(),
+                record.httpMethod(),
+                record.destinationUri(),
+                record.inboundUri(),
+                record.operation());
+    }
+
+    /**
+     * Logs the response at INFO, once it has been received or the call has failed.
+     *
+     * <p>Identified by {@code outbound-req-response}, replacing the {@code outbound-call} naming
+     * this entry used before spec 003. Note that {@link #logWarn} deliberately keeps its
+     * {@code outbound-call-instrumentation-error} text — it is not per-call telemetry, so a
+     * prefix match on {@code outbound-call} now catches only that warning.
+     *
+     * @param record the completed call; never null
      */
     public void log(OutboundCallRecord record) {
-        log.info("outbound-call source={} destination={} method={} httpStatus={} httpStatusGroup={} "
+        log.info("outbound-req-response source={} destination={} method={} destinationUri={} inboundUri={} "
+                        + "operation={} httpStatus={} httpStatusGroup={} "
                         + "responseCode={} responseMessage={}",
                 record.source(),
                 record.destination(),
                 record.httpMethod(),
+                record.destinationUri(),
+                record.inboundUri(),
+                record.operation(),
                 record.httpStatusCode() == null ? NONE : record.httpStatusCode(),
                 record.httpStatusGroup(),
                 record.responseCode() == null ? ABSENT : record.responseCode(),

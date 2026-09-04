@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
@@ -221,5 +222,167 @@ class NonIntrusionWebClientTest {
 
         assertThat(body).isEqualTo(payload);
         assertThat(this.callLogger.onlyRecord().responseCode()).isEqualTo(0);
+    }
+
+    // ---- spec 003 (T050): the same per-step failure matrix, reactive ------------------
+
+    private static final String SPEC003_PAYLOAD = "{\"responseCode\":0,\"message\":\"OK\"}";
+
+    /** Injects the spec-003 collaborators so each new step can be broken independently. */
+    private WebClient withCollaborators(
+            com.bookit.servicecalllogging.uri.DestinationUriResolver destinationUriResolver,
+            com.bookit.servicecalllogging.uri.InboundUriResolver inboundUriResolver,
+            com.bookit.servicecalllogging.operation.OperationResolver operationResolver,
+            com.bookit.servicecalllogging.metrics.OutboundCallMetrics metrics,
+            com.bookit.servicecalllogging.logging.CallLogger logger) {
+        return builderWithRoomForLargeBodies()
+                .filter(new OutboundCallExchangeFilter(
+                        new DestinationNameResolver("my-service"), new JacksonResponseCodeExtractor(),
+                        logger, metrics, TestProperties.defaults(), null,
+                        destinationUriResolver, inboundUriResolver, operationResolver))
+                .build();
+    }
+
+    private void assertReactiveCallSurvives(WebClient webClient) {
+        assertThatCode(() -> {
+            String body = webClient.get().uri(this.server.url("/accounts/7"))
+                    .retrieve().bodyToMono(String.class).block(java.time.Duration.ofSeconds(20));
+            assertThat(body).isEqualTo(SPEC003_PAYLOAD);
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    void aDestinationUriResolverThatThrowsLosesTheDimensionButNotTheReactiveCall() {
+        this.server.respondWith(200, SPEC003_PAYLOAD);
+
+        assertReactiveCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver() {
+                    @Override
+                    public Resolved resolve(java.net.URI requestUri) {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                null, this.callLogger));
+    }
+
+    @Test
+    void anInboundUriResolverThatThrowsLosesTheDimensionButNotTheReactiveCall() {
+        this.server.respondWith(200, SPEC003_PAYLOAD);
+
+        assertReactiveCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver(),
+                new com.bookit.servicecalllogging.uri.InboundUriResolver() {
+                    @Override
+                    public String resolve() {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                null, this.callLogger));
+    }
+
+    @Test
+    void anOperationResolverThatThrowsLosesTheDimensionButNotTheReactiveCall() {
+        this.server.respondWith(200, SPEC003_PAYLOAD);
+
+        assertReactiveCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver(),
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver() {
+                    @Override
+                    public String resolve(String headerValue) {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                null, this.callLogger));
+    }
+
+    @Test
+    void aTimerRecordThatThrowsLosesTheMetricButNotTheReactiveCall() {
+        this.server.respondWith(200, SPEC003_PAYLOAD);
+        com.bookit.servicecalllogging.metrics.OutboundCallMetrics exploding =
+                new com.bookit.servicecalllogging.metrics.OutboundCallMetrics(
+                        new io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
+                        TestProperties.defaults()) {
+                    @Override
+                    public void record(String destination,
+                                       com.bookit.servicecalllogging.metrics.Outcome outcome,
+                                       String httpStatusGroup, String destinationUri,
+                                       String inboundUri, String operation, long elapsedNanos) {
+                        throw new IllegalStateException("boom");
+                    }
+                };
+
+        assertReactiveCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver(),
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                exploding, this.callLogger));
+    }
+
+    @Test
+    void aSendTimeEntryThatThrowsDoesNotPreventTheExchange() {
+        this.server.respondWith(200, SPEC003_PAYLOAD);
+
+        assertReactiveCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver(),
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                null,
+                new com.bookit.servicecalllogging.logging.CallLogger() {
+                    @Override
+                    public void logRequest(
+                            com.bookit.servicecalllogging.logging.OutboundCallRecord record) {
+                        throw new IllegalStateException("boom");
+                    }
+                }));
+    }
+
+    @Test
+    void everyNewStepThrowingAtOnceLeavesTheReactiveResponseByteForByteIdentical() {
+        this.server.respondWith(200, SPEC003_PAYLOAD);
+        byte[] uninstrumented = builderWithRoomForLargeBodies().build()
+                .get().uri(this.server.url("/accounts/7"))
+                .retrieve().bodyToMono(byte[].class).block(java.time.Duration.ofSeconds(20));
+
+        WebClient allBroken = withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver() {
+                    @Override
+                    public Resolved resolve(java.net.URI requestUri) {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                new com.bookit.servicecalllogging.uri.InboundUriResolver() {
+                    @Override
+                    public String resolve() {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                new com.bookit.servicecalllogging.operation.OperationResolver() {
+                    @Override
+                    public String resolve(String headerValue) {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                null,
+                new com.bookit.servicecalllogging.logging.CallLogger() {
+                    @Override
+                    public void logRequest(
+                            com.bookit.servicecalllogging.logging.OutboundCallRecord record) {
+                        throw new IllegalStateException("boom");
+                    }
+
+                    @Override
+                    public void log(com.bookit.servicecalllogging.logging.OutboundCallRecord record) {
+                        throw new IllegalStateException("boom");
+                    }
+                });
+
+        byte[] viaBrokenStarter = allBroken.get().uri(this.server.url("/accounts/7"))
+                .retrieve().bodyToMono(byte[].class).block(java.time.Duration.ofSeconds(20));
+
+        assertThat(viaBrokenStarter).isEqualTo(uninstrumented);
     }
 }

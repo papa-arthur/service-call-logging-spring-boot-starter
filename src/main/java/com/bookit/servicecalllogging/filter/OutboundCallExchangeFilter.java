@@ -10,7 +10,10 @@ import com.bookit.servicecalllogging.logging.OutboundCallRecord;
 import com.bookit.servicecalllogging.metrics.OutboundCallMetrics;
 import com.bookit.servicecalllogging.metrics.Outcome;
 import com.bookit.servicecalllogging.metrics.ResponseCodeResult;
+import com.bookit.servicecalllogging.operation.OperationResolver;
 import com.bookit.servicecalllogging.resolver.DestinationNameResolver;
+import com.bookit.servicecalllogging.uri.DestinationUriResolver;
+import com.bookit.servicecalllogging.uri.InboundUriResolver;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.web.reactive.function.client.ClientRequest;
 import org.springframework.web.reactive.function.client.ClientResponse;
@@ -50,6 +53,20 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
     private final ResponseCodeExtractor responseCodeExtractor;
     private final CallLogger callLogger;
     private final OutboundCallMetrics outboundCallMetrics;
+    private final DestinationUriResolver destinationUriResolver;
+    private final InboundUriResolver inboundUriResolver;
+    private final OperationResolver operationResolver;
+
+    /**
+     * {@code DefaultWebClient.URI_TEMPLATE_ATTRIBUTE}, as a literal.
+     *
+     * <p>Verified present in spring-webflux 6.1.21: {@code DefaultWebClient} publishes the URI
+     * template under this request attribute, so the reactive path needs no {@code ThreadLocal}
+     * hand-off — the framework already carries the template on the request (research.md §2). The
+     * key is used as a string rather than referencing the internal class.
+     */
+    private static final String WEBCLIENT_URI_TEMPLATE_ATTRIBUTE =
+            "org.springframework.web.reactive.function.client.WebClient.uriTemplate";
     private final ServiceCallLoggingProperties properties;
     private final EnvelopeFieldExtractor envelopeFieldExtractor;
 
@@ -87,17 +104,87 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
                                       OutboundCallMetrics outboundCallMetrics,
                                       ServiceCallLoggingProperties properties,
                                       EnvelopeFieldExtractor envelopeFieldExtractor) {
+        this(destinationNameResolver, responseCodeExtractor, callLogger, outboundCallMetrics,
+                properties, envelopeFieldExtractor,
+                new DestinationUriResolver(), new InboundUriResolver(), new OperationResolver());
+    }
+
+    /**
+     * @param destinationUriResolver resolves the destination URI's log and metric surfaces
+     * @param inboundUriResolver     resolves the inbound request path; on this path it is expected
+     *                               to yield the fallback, since context propagation across the
+     *                               reactive boundary is the consuming service's responsibility
+     */
+    public OutboundCallExchangeFilter(DestinationNameResolver destinationNameResolver,
+                                      ResponseCodeExtractor responseCodeExtractor,
+                                      CallLogger callLogger,
+                                      OutboundCallMetrics outboundCallMetrics,
+                                      ServiceCallLoggingProperties properties,
+                                      EnvelopeFieldExtractor envelopeFieldExtractor,
+                                      DestinationUriResolver destinationUriResolver,
+                                      InboundUriResolver inboundUriResolver,
+                                      OperationResolver operationResolver) {
         this.destinationNameResolver = destinationNameResolver;
         this.responseCodeExtractor = responseCodeExtractor;
         this.callLogger = callLogger;
         this.outboundCallMetrics = outboundCallMetrics;
         this.properties = properties;
         this.envelopeFieldExtractor = envelopeFieldExtractor;
+        this.destinationUriResolver = destinationUriResolver;
+        this.inboundUriResolver = inboundUriResolver;
+        this.operationResolver = operationResolver;
+    }
+
+    /**
+     * Resolves the destination URI on the reactive path.
+     *
+     * <p>The template comes from the request attribute {@code WebClient} sets, not from a
+     * {@code ThreadLocal}: on this path the framework carries it on the request itself, so there
+     * is no hand-off to get wrong and no staleness to guard against. A {@code WebClient} call
+     * built from a pre-made {@code URI} carries no such attribute and correctly degrades to the
+     * raw path in logs with the placeholder on the metric (FR-004).
+     */
+    private DestinationUriResolver.Resolved resolveDestinationUri(ClientRequest request) {
+        try {
+            Object template = request.attributes().get(WEBCLIENT_URI_TEMPLATE_ATTRIBUTE);
+            if (template instanceof String uriTemplate && !uriTemplate.isBlank()) {
+                com.bookit.servicecalllogging.uri.UriTemplateCapture.capture(uriTemplate, request.url());
+            }
+            return this.destinationUriResolver.resolve(request.url());
+        } catch (Exception resolutionFailure) {
+            return new DestinationUriResolver.Resolved(
+                    DestinationUriResolver.UNKNOWN, DestinationUriResolver.UNKNOWN);
+        }
+    }
+
+    /**
+     * Reads the operation header on the reactive path. Read-only: {@code ClientRequest.headers()}
+     * is inspected, never rebuilt, so a value rejected for telemetry still reaches the destination
+     * exactly as the calling code set it (FR-024).
+     */
+    private String safeResolveOperation(ClientRequest request) {
+        try {
+            return this.operationResolver.resolve(
+                    request.headers().getFirst(OperationResolver.HEADER_NAME));
+        } catch (Exception resolutionFailure) {
+            return OperationResolver.UNDEFINED;
+        }
+    }
+
+    /** Guarded like every other telemetry step (FR-037). */
+    private String safeResolveInboundUri() {
+        try {
+            return this.inboundUriResolver.resolve();
+        } catch (Exception resolutionFailure) {
+            return DestinationUriResolver.UNKNOWN;
+        }
     }
 
     @Override
     public Mono<ClientResponse> filter(ClientRequest request, ExchangeFunction next) {
         Instant startedAt = Instant.now();
+        // Monotonic clock for the measurement; the Instant above is the record's timestamp.
+        long startedNanos = System.nanoTime();
         String source = this.destinationNameResolver.getSourceName();
         String httpMethod = request.method().name();
 
@@ -117,19 +204,33 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
         }
 
         String resolvedDestination = destination;
+        DestinationUriResolver.Resolved destinationUri = resolveDestinationUri(outgoing);
+        String inboundUri = safeResolveInboundUri();
+        String operation = safeResolveOperation(outgoing);
+
+        // Before dispatch, for the same reason as the blocking path (FR-031).
+        safeLogRequest(new OutboundCallRecord(source, resolvedDestination, httpMethod, null, null,
+                null, null, destinationUri.logValue(), inboundUri, operation, startedAt));
+
         return next.exchange(outgoing)
-                .flatMap(response -> instrument(response, source, resolvedDestination, httpMethod, startedAt))
+                .flatMap(response -> instrument(response, source, resolvedDestination, httpMethod,
+                        startedAt, startedNanos, destinationUri, inboundUri, operation))
                 .onErrorResume(transportFailure -> {
                     safeLog(new OutboundCallRecord(source, resolvedDestination, httpMethod, null,
-                            HttpStatusGroup.NETWORK_ERROR, null, null, startedAt));
-                    safeRecordMetrics(resolvedDestination, Outcome.ABSENT, HttpStatusGroup.NETWORK_ERROR);
+                            HttpStatusGroup.NETWORK_ERROR, null, null,
+                            destinationUri.logValue(), inboundUri, operation, startedAt));
+                    safeRecordMetrics(resolvedDestination, Outcome.ABSENT, HttpStatusGroup.NETWORK_ERROR,
+                            destinationUri.metricValue(), inboundUri, operation,
+                            System.nanoTime() - startedNanos);
                     // The business call must still fail exactly as it would have.
                     return Mono.error(transportFailure);
                 });
     }
 
     private Mono<ClientResponse> instrument(ClientResponse response, String source, String destination,
-                                            String httpMethod, Instant startedAt) {
+                                            String httpMethod, Instant startedAt, long startedNanos,
+                                            DestinationUriResolver.Resolved destinationUri,
+                                            String inboundUri, String operation) {
         int statusCode;
         String statusGroup;
         Flux<DataBuffer> cachedBody;
@@ -152,10 +253,14 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
 
         return parsed
                 .doOnNext(interpreted -> {
+                    // Operation still awaits US2 on this path.
                     safeLog(new OutboundCallRecord(source, destination, httpMethod,
                             statusCode, statusGroup, interpreted.result().rawCode(),
-                            interpreted.message(), startedAt));
-                    safeRecordMetrics(destination, interpreted.result().outcome(), statusGroup);
+                            interpreted.message(),
+                            destinationUri.logValue(), inboundUri, operation, startedAt));
+                    safeRecordMetrics(destination, interpreted.result().outcome(), statusGroup,
+                            destinationUri.metricValue(), inboundUri, operation,
+                            System.nanoTime() - startedNanos);
                 })
                 .then(Mono.fromCallable(() -> response.mutate().body(cachedBody).build()))
                 .onErrorResume(instrumentationFailure -> {
@@ -209,6 +314,15 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
         static final Interpreted ABSENT = new Interpreted(ResponseCodeResult.ABSENT, null);
     }
 
+    /** Same contract as {@link #safeLog}, for the send-time entry. */
+    private void safeLogRequest(OutboundCallRecord record) {
+        try {
+            this.callLogger.logRequest(record);
+        } catch (Exception loggingFailure) {
+            // Nothing has been exchanged yet; this must not affect it.
+        }
+    }
+
     /** Emits the log entry, absorbing any failure: telemetry is best-effort, the call is not. */
     private void safeLog(OutboundCallRecord record) {
         try {
@@ -222,12 +336,15 @@ public class OutboundCallExchangeFilter implements ExchangeFilterFunction {
      * Increments the counter when a recorder exists, under its own guard so that a metrics
      * failure can neither break the call nor suppress the log entry that precedes it.
      */
-    private void safeRecordMetrics(String destination, Outcome outcome, String statusGroup) {
+    private void safeRecordMetrics(String destination, Outcome outcome, String statusGroup,
+                                   String destinationUri, String inboundUri, String operation,
+                                   long elapsedNanos) {
         if (this.outboundCallMetrics == null) {
             return;
         }
         try {
-            this.outboundCallMetrics.record(destination, outcome, statusGroup);
+            this.outboundCallMetrics.record(destination, outcome, statusGroup,
+                    destinationUri, inboundUri, operation, elapsedNanos);
         } catch (Exception metricsFailure) {
             // Same contract as logging: telemetry is best-effort.
         }

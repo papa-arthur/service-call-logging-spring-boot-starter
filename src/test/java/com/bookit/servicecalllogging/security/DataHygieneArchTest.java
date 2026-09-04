@@ -106,7 +106,11 @@ class DataHygieneArchTest {
         // Anything else appearing here is a data-hygiene regression, not a feature.
         List<String> permitted = List.of(
                 "source", "destination", "httpMethod", "httpStatusCode", "httpStatusGroup",
-                "responseCode", "message", "timestamp");
+                "responseCode", "message", "timestamp",
+                // Admitted by the Principle VII expansion ratified in constitution v1.2.0:
+                // both URIs are path components only and the operation is shape-bounded, so
+                // none of the three can carry a credential, a query string or a free-text body.
+                "destinationUri", "inboundUri", "operation");
 
         List<String> actual = Stream.of(
                         com.bookit.servicecalllogging.logging.OutboundCallRecord.class.getRecordComponents())

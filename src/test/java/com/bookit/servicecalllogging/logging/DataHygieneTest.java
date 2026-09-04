@@ -88,7 +88,7 @@ class DataHygieneTest {
         });
 
         // ...yet the starter's log line mentions none of it
-        assertThat(output).contains("outbound-call source=my-service");
+        assertThat(output).contains("outbound-req-response source=my-service");
         assertNothingSensitiveWasLogged(output);
     }
 
@@ -106,7 +106,7 @@ class DataHygieneTest {
             assertThat(this.server.lastRequestHeader("Authorization")).contains(SECRET);
         });
 
-        assertThat(output).contains("outbound-call source=my-service");
+        assertThat(output).contains("outbound-req-response source=my-service");
         assertNothingSensitiveWasLogged(output);
     }
 

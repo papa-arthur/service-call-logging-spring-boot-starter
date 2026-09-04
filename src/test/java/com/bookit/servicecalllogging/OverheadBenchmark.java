@@ -43,8 +43,22 @@ class OverheadBenchmark {
     private static final byte[] SMALL_BODY =
             "{\"responseCode\":0,\"message\":\"OK\",\"data\":{\"id\":4242}}".getBytes(StandardCharsets.UTF_8);
 
-    /** Discards records so logging I/O does not dominate the measurement. */
+    /**
+     * Discards records so logging I/O does not dominate the measurement.
+     *
+     * <p><strong>Both</strong> entry methods must be overridden. Since spec 003 a call emits two
+     * entries — {@code logRequest} before dispatch and {@code log} on completion — and overriding
+     * only {@code log} leaves the send-time entry doing real SLF4J I/O, which silently turns this
+     * into a measurement of the logging framework rather than of the starter's own work. That is
+     * the same trap the README warns adopters about for {@code CallLogger} subclasses; it caught
+     * this benchmark first.
+     */
     private static final CallLogger SILENT_LOGGER = new CallLogger() {
+        @Override
+        public void logRequest(OutboundCallRecord record) {
+            // intentionally empty
+        }
+
         @Override
         public void log(OutboundCallRecord record) {
             // intentionally empty

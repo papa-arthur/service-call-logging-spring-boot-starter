@@ -4,13 +4,14 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.convert.DurationStyle;
 import org.springframework.boot.context.properties.bind.DefaultValue;
-import org.springframework.validation.annotation.Validated;
 
+import java.time.Duration;
 import java.util.List;
 
 /**
- * All nine configuration keys the starter exposes, bound from the
+ * All thirteen configuration keys the starter exposes, bound from the
  * {@code service-call-logging.*} prefix. Fully documented in
  * {@code contracts/configuration.md} and in the project README.
  *
@@ -30,7 +31,6 @@ import java.util.List;
  *                              "use the built-in default for every call"
  */
 @ConfigurationProperties(prefix = "service-call-logging")
-@Validated
 public record ServiceCallLoggingProperties(
 
         @DefaultValue("true")
@@ -64,16 +64,56 @@ public record ServiceCallLoggingProperties(
      */
     public ServiceCallLoggingProperties {
         envelopes = envelopes == null ? List.of() : List.copyOf(envelopes);
+        requireNotBlank(sourceHeaderName, "service-call-logging.source-header-name");
+        requireNotBlank(destinationHeaderName, "service-call-logging.destination-header-name");
+        requireNotBlank(serviceNameHintHeader, "service-call-logging.service-name-hint-header");
+        if (maxBodyBytes < 0) {
+            throw new IllegalArgumentException(
+                    "service-call-logging.max-body-bytes must not be negative, but was " + maxBodyBytes);
+        }
     }
 
     /**
-     * Micrometer naming configuration. The counter is registered as {@code <prefix>.total};
-     * Prometheus renders that as {@code http_outbound_calls_total}.
+     * Enforces a {@code @NotBlank} constraint without a Bean Validation provider.
      *
-     * @param prefix             counter name prefix
-     * @param destinationTagName tag key for the destination service name
-     * @param outcomeTagName     tag key for the call outcome
-     * @param statusGroupTagName tag key for the HTTP status group
+     * <p>Constitution Principle II: this starter must not change a consuming service's startup
+     * success. Spring's configuration-properties binder decides whether to run JSR-303
+     * validation from the presence of {@code jakarta.validation.Validator} alone and never
+     * checks for an implementation, so a single {@code @Validated} on this class made every
+     * application that carries the API without a provider fail to start. The constraint
+     * annotations below are retained as documentation and for the configuration-metadata
+     * processor; enforcement lives here, where no provider is required.
+     */
+    private static void requireNotBlank(String value, String key) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException(key + " must not be blank");
+        }
+    }
+
+    /**
+     * Micrometer naming configuration. The counter is registered as {@code <prefix>.total} and
+     * the latency timer as {@code <prefix>.latency}; Prometheus renders those as
+     * {@code http_outbound_calls_total} and {@code http_outbound_calls_latency_seconds}.
+     *
+     * @param prefix                counter and timer name prefix
+     * @param destinationTagName    tag key for the destination service name
+     * @param outcomeTagName        tag key for the call outcome
+     * @param statusGroupTagName    tag key for the HTTP status group
+     * @param destinationUriTagName tag key for the destination URI path (spec 003)
+     * @param inboundUriTagName     tag key for the inbound request URI path (spec 003)
+     * @param operationTagName      tag key for the caller-supplied business operation (spec 003)
+     * @param latencyBuckets        explicit latency bucket boundaries for the timer, as
+     *                              configured strings ({@code 50ms}, {@code 1s}, {@code PT2S});
+     *                              empty means delegate to the metrics library's own default
+     *                              distribution (spec 003 FR-012). Bound as strings, not as
+     *                              {@code Duration}, deliberately: FR-014 requires an unusable
+     *                              value to be discarded rather than to fail the consuming
+     *                              service's startup, and a typed binding would reject it before
+     *                              this starter ever saw it. Use
+     *                              {@link Metrics#latencyBucketDurations()} for the parsed,
+     *                              filtered boundaries. The effective default is a property of
+     *                              the library version on the classpath, not of this starter —
+     *                              see the README.
      */
     public record Metrics(
 
@@ -91,7 +131,62 @@ public record ServiceCallLoggingProperties(
 
             @DefaultValue("http_status_group")
             @NotBlank
-            String statusGroupTagName) {
+            String statusGroupTagName,
+
+            @DefaultValue("destination_uri")
+            @NotBlank
+            String destinationUriTagName,
+
+            @DefaultValue("inbound_uri")
+            @NotBlank
+            String inboundUriTagName,
+
+            @DefaultValue("operation")
+            @NotBlank
+            String operationTagName,
+
+            List<String> latencyBuckets) {
+
+        /**
+         * Same provider-free enforcement as the outer record — see {@code requireNotBlank} —
+         * plus normalisation of an absent bucket list to an empty one, so every caller sees the
+         * same shape and "empty" unambiguously means "delegate to the library" (FR-014).
+         */
+        public Metrics {
+            requireNotBlank(prefix, "service-call-logging.metrics.prefix");
+            requireNotBlank(destinationTagName, "service-call-logging.metrics.destination-tag-name");
+            requireNotBlank(outcomeTagName, "service-call-logging.metrics.outcome-tag-name");
+            requireNotBlank(statusGroupTagName, "service-call-logging.metrics.status-group-tag-name");
+            requireNotBlank(destinationUriTagName, "service-call-logging.metrics.destination-uri-tag-name");
+            requireNotBlank(inboundUriTagName, "service-call-logging.metrics.inbound-uri-tag-name");
+            requireNotBlank(operationTagName, "service-call-logging.metrics.operation-tag-name");
+            latencyBuckets = latencyBuckets == null ? List.of() : List.copyOf(latencyBuckets);
+        }
+
+        /**
+         * The configured boundaries, parsed and filtered down to the ones actually usable.
+         *
+         * <p>Anything unparseable, zero or negative is discarded rather than rejected (FR-014).
+         * An empty result — whether because nothing was configured or because nothing survived
+         * filtering — means "delegate to the metrics library's default distribution" (FR-012).
+         */
+        public List<Duration> latencyBucketDurations() {
+            List<Duration> parsed = new java.util.ArrayList<>();
+            for (String raw : this.latencyBuckets) {
+                if (raw == null || raw.isBlank()) {
+                    continue;
+                }
+                try {
+                    Duration candidate = DurationStyle.detectAndParse(raw.trim());
+                    if (!candidate.isZero() && !candidate.isNegative()) {
+                        parsed.add(candidate);
+                    }
+                } catch (RuntimeException unusable) {
+                    // Discarded on purpose: a bad boundary costs a bucket, never a startup.
+                }
+            }
+            return List.copyOf(parsed);
+        }
     }
 
     /**

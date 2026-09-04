@@ -69,6 +69,36 @@ class MetricsAbsentWhenNoRegistryTest {
                 });
     }
 
+    @Test
+    void noLatencyTimerIsRegisteredWhenTheConsumerHasNoMeterRegistry() {
+        // spec 003 (T042) — Principle II: the timer is part of the metrics facility, so it must
+        // be absent along with it, while logging carries on regardless.
+        this.runner.run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).doesNotHaveBean(OutboundCallMetrics.class);
+            assertThat(context).doesNotHaveBean(MeterRegistry.class);
+            assertThat(context)
+                    .as("logging must remain active with no metrics facility present")
+                    .hasSingleBean(com.bookit.servicecalllogging.logging.CallLogger.class);
+        });
+    }
+
+    @Test
+    void theLatencyTimerIsRegisteredOnlyOnceAMeterRegistryExists() {
+        this.runner.withUserConfiguration(MeterRegistryConfig.class).run(context -> {
+            assertThat(context).hasSingleBean(OutboundCallMetrics.class);
+
+            context.getBean(OutboundCallMetrics.class)
+                    .record("svc:8080", com.bookit.servicecalllogging.metrics.Outcome.SUCCESS,
+                            "2xx", 1_000_000L);
+
+            assertThat(context.getBean(MeterRegistry.class)
+                    .find("http.outbound.calls.latency").timer())
+                    .as("the timer appears once a registry is present")
+                    .isNotNull();
+        });
+    }
+
     @Configuration(proxyBeanMethods = false)
     static class CustomMetricsConfig {
         @Bean

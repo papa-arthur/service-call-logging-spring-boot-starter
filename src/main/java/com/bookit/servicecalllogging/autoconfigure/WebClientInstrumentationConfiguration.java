@@ -6,7 +6,10 @@ import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
 import com.bookit.servicecalllogging.filter.OutboundCallExchangeFilter;
 import com.bookit.servicecalllogging.logging.CallLogger;
 import com.bookit.servicecalllogging.metrics.OutboundCallMetrics;
+import com.bookit.servicecalllogging.operation.OperationResolver;
 import com.bookit.servicecalllogging.resolver.DestinationNameResolver;
+import com.bookit.servicecalllogging.uri.DestinationUriResolver;
+import com.bookit.servicecalllogging.uri.InboundUriResolver;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -35,7 +38,10 @@ class WebClientInstrumentationConfiguration {
                                                           CallLogger callLogger,
                                                           ObjectProvider<OutboundCallMetrics> outboundCallMetrics,
                                                           ServiceCallLoggingProperties properties,
-                                                          ObjectProvider<EnvelopeFieldExtractor> envelopeFieldExtractor) {
+                                                          ObjectProvider<EnvelopeFieldExtractor> envelopeFieldExtractor,
+                                                          DestinationUriResolver destinationUriResolver,
+                                                          InboundUriResolver inboundUriResolver,
+                                                          OperationResolver operationResolver) {
         return new OutboundCallExchangeFilter(
                 destinationNameResolver,
                 responseCodeExtractor.getIfAvailable(() -> bytes -> Optional.empty()),
@@ -44,7 +50,14 @@ class WebClientInstrumentationConfiguration {
                 outboundCallMetrics.getIfAvailable(),
                 properties,
                 // Absent whenever Jackson is missing; the message is then simply never read.
-                envelopeFieldExtractor.getIfAvailable());
+                envelopeFieldExtractor.getIfAvailable(),
+                // The auto-configured singletons from ServiceCallLoggingAutoConfiguration (spec
+                // 003 remediation, T062): shared with the RestTemplate path so the operation
+                // admission cap, and any consumer override of the three resolver beans, apply
+                // application-wide rather than per client type.
+                destinationUriResolver,
+                inboundUriResolver,
+                operationResolver);
     }
 
     /**

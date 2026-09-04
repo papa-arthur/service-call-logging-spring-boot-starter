@@ -95,6 +95,40 @@ public class ServiceCallLoggingAutoConfiguration {
     }
 
     /**
+     * Resolves the destination URI's two surfaces (spec 003, FR-003 to FR-005). Replaceable like
+     * every other starter bean — a consumer wanting different normalisation declares their own.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public com.bookit.servicecalllogging.uri.DestinationUriResolver destinationUriResolver() {
+        return new com.bookit.servicecalllogging.uri.DestinationUriResolver();
+    }
+
+    /**
+     * Resolves the inbound request's path (spec 003, FR-006 to FR-008). Contributes no dependency
+     * of its own: the servlet attribute key is read as a literal string precisely so that a
+     * consumer with no servlet stack is unaffected (Principle II).
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public com.bookit.servicecalllogging.uri.InboundUriResolver inboundUriResolver() {
+        return new com.bookit.servicecalllogging.uri.InboundUriResolver();
+    }
+
+    /**
+     * Resolves the caller-supplied business operation (spec 003, FR-017 to FR-025).
+     *
+     * <p>Deliberately a singleton: the distinct-value cap is per resolver instance, so one shared
+     * bean means one cap for the whole application rather than a fresh, separately-exhaustible cap
+     * per client.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public com.bookit.servicecalllogging.operation.OperationResolver operationResolver() {
+        return new com.bookit.servicecalllogging.operation.OperationResolver();
+    }
+
+    /**
      * The metrics recorder, created only when the consumer already has a {@link MeterRegistry}
      * — that is, when Actuator is on their classpath. Without one, no metrics are recorded and
      * nothing fails: instrumentation carries on logging (Constitution Principle II).

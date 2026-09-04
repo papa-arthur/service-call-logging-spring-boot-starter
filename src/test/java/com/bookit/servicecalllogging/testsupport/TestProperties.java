@@ -15,7 +15,15 @@ public final class TestProperties {
 
     public static ServiceCallLoggingProperties.Metrics defaultMetrics() {
         return new ServiceCallLoggingProperties.Metrics(
-                "http.outbound.calls", "destination", "outcome", "http_status_group");
+                "http.outbound.calls", "destination", "outcome", "http_status_group",
+                "destination_uri", "inbound_uri", "operation", java.util.List.of());
+    }
+
+    /** Metrics config with explicit latency bucket boundaries (spec 003). */
+    public static ServiceCallLoggingProperties.Metrics metricsWithLatencyBuckets(String... buckets) {
+        return new ServiceCallLoggingProperties.Metrics(
+                "http.outbound.calls", "destination", "outcome", "http_status_group",
+                "destination_uri", "inbound_uri", "operation", java.util.List.of(buckets));
     }
 
     public static ServiceCallLoggingProperties defaults() {
