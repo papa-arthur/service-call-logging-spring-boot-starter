@@ -24,7 +24,7 @@ Add the starter to `pom.xml`:
 
 ```xml
 <dependency>
-    <groupId>com.bookit</groupId>
+    <groupId>com.telecelghana.play.app.common</groupId>
     <artifactId>service-call-logging-spring-boot-starter</artifactId>
     <version>1.0.0</version>
 </dependency>

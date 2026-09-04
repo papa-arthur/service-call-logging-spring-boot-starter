@@ -8,7 +8,7 @@
 ## Interface
 
 ```java
-package com.bookit.servicecalllogging;
+package com.telecelghana.play.app.common.servicecalllogging;
 
 import java.util.Optional;
 

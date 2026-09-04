@@ -11,7 +11,7 @@ enforced test gate — **without ever changing the outcome of the calls it obser
 
 ```xml
 <dependency>
-    <groupId>com.bookit</groupId>
+    <groupId>com.telecelghana.play.app.common</groupId>
     <artifactId>service-call-logging-spring-boot-starter</artifactId>
     <version>1.0.0</version>
 </dependency>
@@ -50,10 +50,10 @@ X-Destination-Service: payments-service:8080
 In your logs:
 
 ```
-INFO  c.b.s.logging.CallLogger - outbound-request source=my-service destination=payments-service:8080 \
+INFO  c.t.p.a.c.s.logging.CallLogger - outbound-request source=my-service destination=payments-service:8080 \
       method=POST destinationUri=/accounts/{id}/transfers inboundUri=/api/v1/payments \
       operation=SendMoney
-INFO  c.b.s.logging.CallLogger - outbound-req-response source=my-service destination=payments-service:8080 \
+INFO  c.t.p.a.c.s.logging.CallLogger - outbound-req-response source=my-service destination=payments-service:8080 \
       method=POST destinationUri=/accounts/{id}/transfers inboundUri=/api/v1/payments \
       operation=SendMoney httpStatus=200 httpStatusGroup=2xx responseCode=0 responseMessage=OK
 ```
@@ -505,6 +505,26 @@ because anyone running the starter from source will see them, and the first adop
 | Query the counter with an exact tag set | It gained `destination_uri`, `inbound_uri` and `operation`, so series identity changed. Queries that **aggregate away** the tags they don't name keep working unchanged; queries asserting a complete tag set need revising |
 | Subclass `CallLogger` | See above — override `logRequest` too |
 
+### Base package renamed: `com.bookit` → `com.telecelghana.play.app.common`
+
+The starter's base package and Maven `groupId` moved from `com.bookit` to
+`com.telecelghana.play.app.common`. Nothing the starter *does* changed — the same fields are
+logged, the same meters and tags are recorded, the same properties and header names apply, and the
+log message text is byte-identical. What changed is every name derived from the package.
+
+The version stays `1.0.0`, so a dependency diff gives you no signal that anything moved. This table
+is the signal.
+
+| If you… | Then… |
+|---|---|
+| Declare the dependency | `groupId` is now `com.telecelghana.play.app.common`. `artifactId` and `version` are unchanged |
+| Import any starter type | Replace the `com.bookit.servicecalllogging.` prefix with `com.telecelghana.play.app.common.servicecalllogging.`. Class names themselves are unchanged, so it is a prefix swap and nothing more |
+| Set log levels or filters on `com.bookit.*` | **Fails silently.** Loggers are per-class, so the categories moved to `com.telecelghana.play.app.common.servicecalllogging.logging.CallLogger` and `...servicecalllogging.resolver.DestinationNameResolver`. A stale `logback-spring.xml` logger, `logging.level.*` entry, log-shipping route or alert rule stops matching without any error — the telemetry just disappears from your pipeline. Key on the parent prefix `com.telecelghana.play.app.common.servicecalllogging` so future moves inside the starter don't repeat this |
+| Exclude the auto-configuration **by string** — `spring.autoconfigure.exclude=…` or `excludeName=…` | **Fails silently, and the starter turns back on.** Spring only reports an invalid exclusion when the named class is on the classpath; after the rename the old name isn't, so the entry is dropped without warning and instrumentation re-attaches. Update the name to `com.telecelghana.play.app.common.servicecalllogging.autoconfigure.ServiceCallLoggingAutoConfiguration`, or use `service-call-logging.enabled=false`, which is unaffected by the rename |
+| Exclude it by class literal — `exclude = ServiceCallLoggingAutoConfiguration.class` | Safe. This breaks at compile time, so you cannot miss it |
+| Read `/actuator/configprops` or `/actuator/beans` programmatically | The configuration-properties bean name embeds the type's FQCN, so the key is now `service-call-logging-com.telecelghana.play.app.common.servicecalllogging.ServiceCallLoggingProperties`. The starter's own `@Bean`-named beans (`callLogger`, `destinationNameResolver`, `outboundCallMetrics`, and the two customizers) are unchanged |
+| Query metrics, read config keys, or match header names | Unaffected. Meter names, tag keys and values, every `service-call-logging.*` property key and all header names are string literals and did not move |
+
 ---
 
 ## Turning it off
@@ -556,7 +576,7 @@ If you need to re-measure on your own hardware:
 mvn test-compile
 mvn dependency:build-classpath -Dmdep.outputFile=cp.txt -Dmdep.includeScope=test
 java -cp "target/classes:target/test-classes:$(cat cp.txt)" \
-  com.bookit.servicecalllogging.OverheadBenchmark
+  com.telecelghana.play.app.common.servicecalllogging.OverheadBenchmark
 ```
 
 Memory is bounded too: the starter copies at most `max-body-bytes` for parsing and stops
