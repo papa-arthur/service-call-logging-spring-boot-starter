@@ -6,6 +6,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Configuration;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class ServiceCallLoggingPropertiesTest {
@@ -125,5 +127,93 @@ class ServiceCallLoggingPropertiesTest {
         assertThat(ServiceCallLoggingProperties.Envelope.DEFAULT.codeField()).isEqualTo("responseCode");
         assertThat(ServiceCallLoggingProperties.Envelope.DEFAULT.messageField()).isEqualTo("message");
         assertThat(ServiceCallLoggingProperties.Envelope.DEFAULT.successfulValue()).isZero();
+    }
+
+    // ===== spec 003 (T005) — the four new metrics keys =====
+
+    @Test
+    void theFourNewMetricsKeysBindToTheirDocumentedDefaults() {
+        runner.run(context -> {
+            ServiceCallLoggingProperties.Metrics metrics =
+                    context.getBean(ServiceCallLoggingProperties.class).metrics();
+
+            assertThat(metrics.destinationUriTagName()).isEqualTo("destination_uri");
+            assertThat(metrics.inboundUriTagName()).isEqualTo("inbound_uri");
+            assertThat(metrics.operationTagName()).isEqualTo("operation");
+            assertThat(metrics.latencyBuckets())
+                    .as("unset means delegate to the metrics library (FR-012)")
+                    .isEmpty();
+        });
+    }
+
+    @Test
+    void theFourNewMetricsKeysBindExplicitValues() {
+        runner.withPropertyValues(
+                        "service-call-logging.metrics.destination-uri-tag-name=dest_path",
+                        "service-call-logging.metrics.inbound-uri-tag-name=in_path",
+                        "service-call-logging.metrics.operation-tag-name=biz_op",
+                        "service-call-logging.metrics.latency-buckets=50ms,200ms,1s")
+                .run(context -> {
+                    ServiceCallLoggingProperties.Metrics metrics =
+                            context.getBean(ServiceCallLoggingProperties.class).metrics();
+
+                    assertThat(metrics.destinationUriTagName()).isEqualTo("dest_path");
+                    assertThat(metrics.inboundUriTagName()).isEqualTo("in_path");
+                    assertThat(metrics.operationTagName()).isEqualTo("biz_op");
+                    assertThat(metrics.latencyBuckets()).containsExactly("50ms", "200ms", "1s");
+                    assertThat(metrics.latencyBucketDurations()).containsExactly(
+                            Duration.ofMillis(50), Duration.ofMillis(200), Duration.ofSeconds(1));
+                });
+    }
+
+    @Test
+    void blankNewTagNamesAreRejected() {
+        runner.withPropertyValues("service-call-logging.metrics.destination-uri-tag-name=")
+                .run(context -> assertThat(context).hasFailed());
+        runner.withPropertyValues("service-call-logging.metrics.inbound-uri-tag-name= ")
+                .run(context -> assertThat(context).hasFailed());
+        runner.withPropertyValues("service-call-logging.metrics.operation-tag-name=")
+                .run(context -> assertThat(context).hasFailed());
+    }
+
+    @Test
+    void unparseableAndNonPositiveBucketValuesAreDiscardedNotRejected() {
+        // FR-014 — a bad boundary costs a bucket, never a startup.
+        runner.withPropertyValues(
+                        "service-call-logging.metrics.latency-buckets=not-a-duration,0s,-5ms,250ms")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    ServiceCallLoggingProperties.Metrics metrics =
+                            context.getBean(ServiceCallLoggingProperties.class).metrics();
+
+                    assertThat(metrics.latencyBuckets()).hasSize(4);
+                    assertThat(metrics.latencyBucketDurations())
+                            .containsExactly(Duration.ofMillis(250));
+                });
+    }
+
+    @Test
+    void anAbsentLatencyBucketListNormalisesToEmptyRatherThanNull() {
+        ServiceCallLoggingProperties.Metrics metrics = new ServiceCallLoggingProperties.Metrics(
+                "http.outbound.calls", "destination", "outcome", "http_status_group",
+                "destination_uri", "inbound_uri", "operation", null);
+
+        assertThat(metrics.latencyBuckets()).isNotNull().isEmpty();
+        assertThat(metrics.latencyBucketDurations()).isNotNull().isEmpty();
+    }
+
+    @Test
+    void theOperationHeaderNameIsNotConfigurable() {
+        // FR-018 — the operation header is a per-call caller input, not a per-service identity.
+        // No property may change it; an attempt to set one must bind nothing and have no effect.
+        runner.withPropertyValues("service-call-logging.operation-header-name=X-Custom-Operation")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    ServiceCallLoggingProperties properties =
+                            context.getBean(ServiceCallLoggingProperties.class);
+                    assertThat(properties.getClass().getRecordComponents())
+                            .as("no record component may expose an operation header name")
+                            .noneMatch(c -> c.getName().toLowerCase().contains("operationheader"));
+                });
     }
 }

@@ -50,15 +50,31 @@ X-Destination-Service: payments-service:8080
 In your logs:
 
 ```
-INFO  c.b.s.logging.CallLogger - outbound-call source=my-service destination=payments-service:8080 \
-      method=POST httpStatus=200 httpStatusGroup=2xx responseCode=0 responseMessage=OK
+INFO  c.b.s.logging.CallLogger - outbound-request source=my-service destination=payments-service:8080 \
+      method=POST destinationUri=/accounts/{id}/transfers inboundUri=/api/v1/payments \
+      operation=SendMoney
+INFO  c.b.s.logging.CallLogger - outbound-req-response source=my-service destination=payments-service:8080 \
+      method=POST destinationUri=/accounts/{id}/transfers inboundUri=/api/v1/payments \
+      operation=SendMoney httpStatus=200 httpStatusGroup=2xx responseCode=0 responseMessage=OK
 ```
+
+**Two entries per call, not one.** The first is written *before* the request is dispatched, so a
+call that hangs until your client times out still leaves a record that it was attempted. The
+second is written when the response arrives — or when the call fails, in which case it carries
+`responseCode=absent`.
 
 At `/actuator/prometheus` (when Actuator is present):
 
 ```
 # TYPE http_outbound_calls_total counter
-http_outbound_calls_total{destination="payments-service:8080",outcome="success",http_status_group="2xx"} 1432.0
+http_outbound_calls_total{destination="payments-service:8080",outcome="success",\
+  http_status_group="2xx",destination_uri="/accounts/{id}/transfers",\
+  inbound_uri="/api/v1/payments",operation="SendMoney"} 1432.0
+
+# TYPE http_outbound_calls_latency_seconds histogram
+http_outbound_calls_latency_seconds_bucket{destination="payments-service:8080",\
+  outcome="success",http_status_group="2xx",destination_uri="/accounts/{id}/transfers",\
+  inbound_uri="/api/v1/payments",operation="SendMoney",le="0.25"} 1301.0
 ```
 
 **Destination name resolution** follows this priority:
@@ -106,6 +122,45 @@ Every key is optional. All ten are listed here with their type, default and effe
 | `service-call-logging.metrics.destination-tag-name` | `String` | `destination` | Tag key for the destination service name. |
 | `service-call-logging.metrics.outcome-tag-name` | `String` | `outcome` | Tag key for the call outcome. |
 | `service-call-logging.metrics.status-group-tag-name` | `String` | `http_status_group` | Tag key for the HTTP status group. |
+| `service-call-logging.metrics.destination-uri-tag-name` | `String` | `destination_uri` | Tag key for the destination URI **path**. |
+| `service-call-logging.metrics.inbound-uri-tag-name` | `String` | `inbound_uri` | Tag key for the path of the inbound request being handled. |
+| `service-call-logging.metrics.operation-tag-name` | `String` | `operation` | Tag key for the caller-supplied business operation. |
+| `service-call-logging.metrics.latency-buckets` | `List<String>` | *(empty)* | Latency bucket boundaries for the `<prefix>.latency` timer, e.g. `[50ms, 200ms, 1s]`. Empty means **delegate to Micrometer's own default distribution** — see below. |
+
+#### `latency-buckets`: the default is delegated, not ours
+
+When `latency-buckets` is unset, this starter defines **no** boundaries of its own. It calls
+Micrometer's `publishPercentileHistogram()`, so the effective buckets belong to the **Micrometer
+version on your classpath**, not to this starter.
+
+Measured against the version this release was built and verified with — **Micrometer 1.13.15**,
+via a Prometheus registry — that produces **68 boundaries** spanning **1 ms to 30 s**:
+
+```
+1ms, 1.049ms, 1.398ms, 1.748ms, 2.097ms, 2.447ms, 2.796ms, 3.146ms, 3.495ms, 3.845ms, 4.194ms,
+5.592ms, 6.991ms, 8.389ms, 9.787ms, 11.185ms, 12.583ms, 13.981ms, 15.379ms, 16.777ms, 22.370ms,
+27.962ms, 33.554ms, 39.147ms, 44.739ms, 50.332ms, 55.924ms, 61.516ms, 67.109ms, 89.478ms,
+111.848ms, 134.218ms, 156.587ms, 178.957ms, 201.327ms, 223.696ms, 246.066ms, 268.435ms,
+357.914ms, 447.392ms, 536.871ms, 626.349ms, 715.828ms, 805.306ms, 894.785ms, 984.263ms,
+1.074s, 1.432s, 1.790s, 2.147s, 2.505s, 2.863s, 3.221s, 3.579s, 3.937s, 4.295s, 5.727s, 7.158s,
+8.590s, 10.022s, 11.453s, 12.885s, 14.317s, 15.748s, 17.180s, 22.906s, 28.633s, 30s
+```
+
+**Upgrading Micrometer can change these boundaries with no change to this starter and no change to
+its version number.** If you need boundaries that are stable across upgrades, set
+`latency-buckets` explicitly — that is the only way to pin them.
+
+> **⚠ Cardinality warning — read before leaving `latency-buckets` unset.**
+> Those 68 boundaries are multiplied by **every combination of the timer's six tags**. A service
+> with 20 destination URI templates, 15 inbound templates, 5 operations, 3 outcomes and 6 status
+> groups reaches `20 × 15 × 5 × 3 × 6 = 27,000` tag combinations, and `27,000 × 68 ≈ 1.8 million`
+> time series. Real traffic never fills the full cross product, but the order of magnitude is the
+> point: it is enough to destabilise a metric store, and it lands on a service that configured
+> nothing.
+>
+> **A service with many endpoints, many downstream endpoints, or many operations should set a
+> short explicit `latency-buckets` list** — five to ten boundaries is ample for percentile and
+> SLO views.
 
 ### Everything, with defaults shown
 
@@ -122,6 +177,10 @@ service-call-logging:
     destination-tag-name: destination
     outcome-tag-name: outcome
     status-group-tag-name: http_status_group
+    destination-uri-tag-name: destination_uri
+    inbound-uri-tag-name: inbound_uri
+    operation-tag-name: operation
+    latency-buckets: []    # empty = delegate to Micrometer's default distribution (68 buckets)
 ```
 
 Full contract: [`contracts/configuration.md`](specs/001-outbound-http-observability/contracts/configuration.md).
@@ -178,17 +237,59 @@ Full contracts:
 
 ## What gets logged
 
-The set of logged fields is **fixed and exhaustive**. These seven, and nothing else:
+The set of logged fields is **fixed and exhaustive**. These ten, and nothing else:
 
-| Field | Meaning |
-|---|---|
-| `source` | Your `spring.application.name`, or `unknown` |
-| `destination` | Resolved destination service name |
-| `method` | HTTP method of the outgoing request |
-| `httpStatus` | Received HTTP status code, or `none` on a network error |
-| `httpStatusGroup` | `2xx` / `4xx` / `5xx` / `network-error` (also `1xx` / `3xx`) |
-| `responseCode` | Parsed business code, or `absent` |
-| `responseMessage` | Parsed business message, logged verbatim with no length limit, or `absent` |
+| Field | Meaning | On which entry |
+|---|---|---|
+| `source` | Your `spring.application.name`, or `unknown` | both |
+| `destination` | Resolved destination service name | both |
+| `method` | HTTP method of the outgoing request | both |
+| `destinationUri` | **Path** of the call's destination — the URI template when your client expanded one, else the raw path, else `unknown` | both |
+| `inboundUri` | **Path** of the inbound request you were handling when the call was made, else `unknown` | both |
+| `operation` | The `X-Operation` header value you supplied, else `undefined` | both |
+| `httpStatus` | Received HTTP status code, or `none` on a network error | response only |
+| `httpStatusGroup` | `2xx` / `4xx` / `5xx` / `network-error` (also `1xx` / `3xx`) | response only |
+| `responseCode` | Parsed business code, or `absent` | response only |
+| `responseMessage` | Parsed business message, logged verbatim with no length limit, or `absent` | response only |
+
+The send-time entry carries no status, response code or message because none of them exist yet.
+
+**Neither URI field ever contains a scheme, host, port, embedded credential or query string.** That
+is structural rather than a redaction step: the recorded value is the URI's *path* component, and a
+credential lives in the authority while a token lives in the query, so neither is representable in
+what gets recorded. Verified by an adversarial test, not by inspection.
+
+### The `X-Operation` header
+
+Set it per call to name the business operation, and every log entry and metric series for that call
+carries it:
+
+```java
+HttpHeaders headers = new HttpHeaders();
+headers.set("X-Operation", "SendMoney");
+restTemplate.exchange(url, HttpMethod.POST, new HttpEntity<>(body, headers), Response.class);
+```
+
+That is all the integration required — the starter only ever *reads* this header. It never adds,
+removes or rewrites it, so whatever you set arrives at the destination byte-identical, **including
+a value the starter rejects for telemetry**.
+
+The header name is fixed and deliberately **not** configurable: it is a per-call input from the
+caller, not a per-service identity like the correlation headers, so there is nothing a
+service-wide property could usefully say about it.
+
+Two bounds apply, and they protect different things:
+
+| Bound | Rule | Why |
+|---|---|---|
+| Shape | ≤ 64 characters from `[A-Za-z0-9._-]` | Excludes whitespace and separators that would break log-line parsing, and makes a value carrying an account number unlikely to pass by accident |
+| Distinct values | At most **100** distinct values per process | The shape bound cannot bound the *count*: `SendMoney-0001`, `SendMoney-0002` … all satisfy it while being unbounded in number, and each new value is a new metric series |
+
+Anything failing either bound is reported as `undefined`. Occupancy is first-come-first-served with
+no eviction: a high-volume junk caller cannot displace an operation already admitted, because a
+dimension whose membership shifted under load would change your dashboard's meaning mid-incident.
+Neither bound is configurable — the dimension is shared infrastructure, and one service raising its
+own cap would spend cardinality everyone pays for.
 
 The starter **never** logs credentials, tokens, `Authorization` or `Cookie` header values, PII,
 or request/response bodies. This is enforced statically: a build-time check fails if any
@@ -202,20 +303,38 @@ stack trace carrying request state.
 
 ## Metrics and Grafana
 
-One counter, three tags. Requires Actuator on your classpath; without it, no metrics are
-recorded and nothing fails.
+Two meters, six tags. Requires Actuator on your classpath; without it, no metrics are recorded
+and nothing fails.
 
-| | |
-|---|---|
-| **Micrometer name** | `http.outbound.calls.total` |
-| **Prometheus name** | `http_outbound_calls_total` |
-| **Type** | Counter (monotonic) |
+| | Counter | Latency timer |
+|---|---|---|
+| **Micrometer name** | `http.outbound.calls.total` | `http.outbound.calls.latency` |
+| **Prometheus name** | `http_outbound_calls_total` | `http_outbound_calls_latency_seconds` |
+| **Type** | Counter (monotonic) | Timer with a bucketed distribution |
+| **Recorded** | once per completed or failed call | elapsed time per call, **including calls that fail before a response** |
 
-| Tag | Values |
-|---|---|
-| `destination` | resolved destination service name |
-| `outcome` | `success` (responseCode 0) · `failure` (non-zero) · `absent` (unparseable) |
-| `http_status_group` | `2xx` · `4xx` · `5xx` · `network-error` (also `1xx` · `3xx`) |
+Both meters carry an **identical** tag set — they are tagged from one shared assembly, so a
+dimension cannot reach one meter and miss the other:
+
+| Tag | Values | Bounded by |
+|---|---|---|
+| `destination` | resolved destination service name | your downstream inventory |
+| `outcome` | `success` (responseCode 0) · `failure` (non-zero) · `absent` (unparseable) | fixed at 3 |
+| `http_status_group` | `2xx` · `4xx` · `5xx` · `network-error` (also `1xx` · `3xx`) | fixed at 6 |
+| `destination_uri` | destination **path** — URI template when your client expanded one; `unresolved` when it did not; `unknown` when no URI could be determined | your route inventory + 2 literals |
+| `inbound_uri` | **path** of the inbound request you were handling, else `unknown` | your own route table + 1 literal |
+| `operation` | your `X-Operation` value, else `undefined` | **≤ 101** (100 admitted + `undefined`) |
+
+**`destination_uri` is `unresolved`, not the raw path, when there is no template.** The log entry
+keeps the raw path because detail is free in a log line; a metric tag does not get it, because a
+path carrying an account number is unique per request and would create one series per request.
+
+**All three of `outcome`'s values are distinct and none is collapsed.** A call whose response code
+could not be determined is `absent` — neither a success nor a failure — so "how much of this
+operation succeeded?" is never silently answered with undetermined calls counted as failures.
+
+Every tag is present on every call. No tag is ever omitted, so a series never appears and
+disappears for the same meter.
 
 Expose the endpoint:
 
@@ -244,6 +363,34 @@ sum by (destination) (increase(http_outbound_calls_total{outcome="failure"}[$__r
 
 ```promql
 sum by (destination) (rate(http_outbound_calls_total[$__rate_interval])) * 60
+```
+
+**Failure share of one business operation** — the question the `operation` tag exists for
+
+```promql
+sum(rate(http_outbound_calls_total{operation="SendMoney",outcome="failure"}[5m]))
+  / sum(rate(http_outbound_calls_total{operation="SendMoney"}[5m]))
+```
+
+**Which of *your* endpoints is generating failing downstream calls**
+
+```promql
+sum by (inbound_uri, destination_uri) (
+  rate(http_outbound_calls_total{outcome="failure"}[$__rate_interval]))
+```
+
+**p99 latency, by the endpoint that triggered the call**
+
+```promql
+histogram_quantile(0.99,
+  sum by (le, inbound_uri) (rate(http_outbound_calls_latency_seconds_bucket[5m])))
+```
+
+**Share of SendMoney calls completing within 500 ms** — an SLO view
+
+```promql
+sum(rate(http_outbound_calls_latency_seconds_bucket{operation="SendMoney",le="0.5"}[5m]))
+  / sum(rate(http_outbound_calls_latency_seconds_count{operation="SendMoney"}[5m]))
 ```
 
 **Alert — network error rate above 5%**
@@ -324,12 +471,39 @@ same type and yours is used instead:
 | `ResponseCodeExtractor` | Response code that configuration alone can't express (e.g. nested, or non-JSON) |
 | `EnvelopeFieldExtractor` | Full control of envelope matching and message extraction |
 | `DestinationNameResolver` | Normalise destination names to control metric cardinality |
-| `CallLogger` | Change the log format, or emit structured JSON |
+| `CallLogger` | Change the log format, or emit structured JSON — **override `logRequest` as well as `log`**, or you get no send-time entry (see below) |
 | `OutboundCallMetrics` | Custom tagging |
 | `OutboundCallInterceptor` | Full control of the blocking path |
 | `OutboundCallExchangeFilter` | Full control of the reactive path |
 | `serviceCallLoggingRestTemplateCustomizer` (by name) | Change how the interceptor is attached |
 | `serviceCallLoggingWebClientCustomizer` (by name) | Change how the filter is attached |
+
+### Subclassing `CallLogger`: override both methods
+
+`CallLogger` now emits **two** entries per call, from two methods:
+
+| Method | Entry |
+|---|---|
+| `logRequest(OutboundCallRecord)` | `outbound-request`, before dispatch |
+| `log(OutboundCallRecord)` | `outbound-req-response`, on completion |
+| `logWarn(...)` | `outbound-call-instrumentation-error`, only when instrumentation itself fails |
+
+If you subclass and override only `log`, your format applies to the response entry and the
+send-time entry silently keeps the default format. Nothing fails and nothing warns — you simply
+get a log surface you did not intend. Override both.
+
+### Behaviour changes from the pre-003 code
+
+No migration is owed: 1.0.0 is unpublished and there are no consumers. These are documented
+because anyone running the starter from source will see them, and the first adopter inherits them.
+
+| If you… | Then… |
+|---|---|
+| Grep or parse for `outbound-call` | The per-call entry is now `outbound-req-response`. Note `outbound-call-instrumentation-error` still begins with those characters, so a naive prefix match now catches **only** the warning |
+| Count log entries per call | It doubled. Budget for two INFO entries per outbound call — a material change to log volume and ingest cost at high call rates |
+| Parse log fields positionally | Three fields were added. Parse by name |
+| Query the counter with an exact tag set | It gained `destination_uri`, `inbound_uri` and `operation`, so series identity changed. Queries that **aggregate away** the tags they don't name keep working unchanged; queries asserting a complete tag set need revising |
+| Subclass `CallLogger` | See above — override `logRequest` too |
 
 ---
 
@@ -348,17 +522,28 @@ removing the dependency or rebuilding against a different artifact.
 ## Performance: per-call overhead budget
 
 Measured on the blocking path with the transport stubbed out, so the figure is purely the
-starter's own work — name resolution, header stamping, body buffering, JSON extraction, logging
-and the counter increment:
+starter's own work — name resolution, header stamping, body buffering, JSON extraction, logging,
+the counter increment and the latency timer:
 
 | Scenario (52-byte JSON envelope) | Overhead per call |
 |---|---|
-| No `envelopes` configured | **~3.3–3.8 µs** |
-| Three combinations configured, matching one last | **~2.3–3.1 µs** |
+| No `envelopes` configured | **~7.9–8.7 µs** |
+| Three combinations configured, matching one last | **~4.8–5.4 µs** |
 
-Adding envelope matching did **not** measurably change this: the extra bounded JSON parse is
-smaller than the run-to-run variance of the benchmark itself, and the number of configured
-combinations makes no practical difference at this body size.
+Re-measured across three runs after this feature landed (Micrometer 1.13.15). The **worst-case
+budget to plan against is unchanged: under 10 µs per call** for envelopes up to a few KB — but note
+the headroom is now thinner than it was, roughly 8 µs of a 10 µs budget rather than 3–4 µs. Adding
+much more per-call work would need the budget revisited rather than quietly exceeded.
+
+The figures do not include logging I/O: the benchmark silences both log entries so it measures the
+starter's own work — name resolution, header stamping, URI resolution, operation resolution, body
+buffering, JSON extraction, the counter and the timer — rather than the throughput of whatever
+logging backend you have configured. **Your real per-call cost will be higher than this**, by
+roughly the cost of two INFO lines through your appender. That is worth measuring on your own
+stack if you make millions of outbound calls a day.
+
+Ignore the gap between the two rows: neither is an average of many runs, and the ordering has
+inverted between measurements, so it does not reflect a real effect of configuring envelopes.
 
 For context, that is roughly **three to four orders of magnitude below** a typical network round
 trip (1–100 ms). Cost scales with body size up to `max-body-bytes` and stops there: past the cap
@@ -421,6 +606,34 @@ These are stated up front so you never discover them in production.
    downstream API that returns a very long message, or one echoing data you'd rather not have in
    your logs, will have it appear in full. You choose which field to read; that choice is yours
    to make deliberately.
+
+9. **`inboundUri` is `unknown` for any call not made on the thread handling the inbound request.**
+   The starter reads the matched endpoint pattern from the current request context, which is
+   thread-bound. So a call made from a scheduled task, a startup hook, an `@Async` method, a
+   `CompletableFuture` continuation, or anywhere on the reactive path reports `unknown` rather
+   than the endpoint that triggered it. This is deliberate, and it is the safe direction to fail:
+   a pooled thread could otherwise report a *previous* request's endpoint, and a call attributed
+   to the wrong endpoint sends you to innocent code during an incident — worse than no
+   attribution at all. Carrying the context across a thread hand-off is your service's
+   responsibility, consistent with limitation 2.
+
+10. **The two entries for one call are paired using *your* log correlation, not anything the
+    starter adds.** Each call now emits `outbound-request` and `outbound-req-response`, and the
+    starter deliberately adds **no** correlation field of its own — the loggable field set stays
+    as small as it is. Pairing therefore relies on the trace and span identifiers your own logging
+    setup stamps on every line. If you have not configured log correlation, or you are on the
+    reactive path (where propagation is your responsibility — see limitation 2), **you cannot
+    reliably tell which request entry belongs to which response entry while calls run
+    concurrently.** Both entries are still emitted in full; only the pairing is unavailable. This
+    is the accepted cost of adding no field, not a defect awaiting a fix.
+
+11. **`destinationUri` is the URI template only when the client expanded one.** Call
+    `getForObject("/accounts/{id}", ..., 42)` and you get `/accounts/{id}`. Pass a pre-built
+    `URI` and there is no template to report, so the log entry shows the raw path
+    (`/accounts/42`) and the **metric tag** shows `unresolved` instead. That asymmetry is
+    intentional: a raw path carrying an account number is unique per request, and putting it in a
+    metric tag would create one time series per request. Detail you want in a log line is exactly
+    what you do not want in a tag.
 
 ---
 

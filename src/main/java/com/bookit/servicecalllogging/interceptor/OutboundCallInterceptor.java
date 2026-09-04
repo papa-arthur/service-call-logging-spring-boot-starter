@@ -8,7 +8,11 @@ import com.bookit.servicecalllogging.logging.OutboundCallRecord;
 import com.bookit.servicecalllogging.metrics.Outcome;
 import com.bookit.servicecalllogging.metrics.OutboundCallMetrics;
 import com.bookit.servicecalllogging.metrics.ResponseCodeResult;
+import com.bookit.servicecalllogging.operation.OperationResolver;
 import com.bookit.servicecalllogging.resolver.DestinationNameResolver;
+import com.bookit.servicecalllogging.uri.DestinationUriResolver;
+import com.bookit.servicecalllogging.uri.InboundUriResolver;
+import com.bookit.servicecalllogging.uri.UriTemplateCapture;
 import org.springframework.http.HttpRequest;
 import org.springframework.http.client.ClientHttpRequestExecution;
 import org.springframework.http.client.ClientHttpRequestInterceptor;
@@ -42,6 +46,9 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
     private final OutboundCallMetrics outboundCallMetrics;
     private final ServiceCallLoggingProperties properties;
     private final EnvelopeFieldExtractor envelopeFieldExtractor;
+    private final DestinationUriResolver destinationUriResolver;
+    private final InboundUriResolver inboundUriResolver;
+    private final OperationResolver operationResolver;
 
     /**
      * Creates an interceptor that logs but records no metrics — the shape used when the
@@ -77,21 +84,61 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
                                    OutboundCallMetrics outboundCallMetrics,
                                    ServiceCallLoggingProperties properties,
                                    EnvelopeFieldExtractor envelopeFieldExtractor) {
+        this(destinationNameResolver, responseCodeExtractor, callLogger, outboundCallMetrics,
+                properties, envelopeFieldExtractor,
+                new DestinationUriResolver(), new InboundUriResolver(), new OperationResolver());
+    }
+
+    /**
+     * @param destinationUriResolver resolves the destination URI's log and metric surfaces
+     * @param inboundUriResolver     resolves the path of the inbound request being handled
+     */
+    public OutboundCallInterceptor(DestinationNameResolver destinationNameResolver,
+                                   ResponseCodeExtractor responseCodeExtractor,
+                                   CallLogger callLogger,
+                                   OutboundCallMetrics outboundCallMetrics,
+                                   ServiceCallLoggingProperties properties,
+                                   EnvelopeFieldExtractor envelopeFieldExtractor,
+                                   DestinationUriResolver destinationUriResolver,
+                                   InboundUriResolver inboundUriResolver,
+                                   OperationResolver operationResolver) {
         this.destinationNameResolver = destinationNameResolver;
         this.responseCodeExtractor = responseCodeExtractor;
         this.callLogger = callLogger;
         this.outboundCallMetrics = outboundCallMetrics;
         this.properties = properties;
         this.envelopeFieldExtractor = envelopeFieldExtractor;
+        this.destinationUriResolver = destinationUriResolver;
+        this.inboundUriResolver = inboundUriResolver;
+        this.operationResolver = operationResolver;
     }
 
     @Override
     public ClientHttpResponse intercept(HttpRequest request, byte[] body,
                                         ClientHttpRequestExecution execution) throws IOException {
+        try {
+            return doIntercept(request, body, execution);
+        } finally {
+            // Whatever happened above — success, transport failure, instrumentation failure — no
+            // capture may survive into the next call on this thread (spec 003, T022).
+            UriTemplateCapture.clear();
+        }
+    }
+
+    private ClientHttpResponse doIntercept(HttpRequest request, byte[] body,
+                                           ClientHttpRequestExecution execution) throws IOException {
         Instant startedAt = Instant.now();
+        // System.nanoTime() for the measurement, Instant for the record's timestamp: the former
+        // is monotonic and immune to wall-clock adjustment, the latter is what an operator reads.
+        long startedNanos = System.nanoTime();
         String source = this.destinationNameResolver.getSourceName();
         String destination = DestinationNameResolver.UNKNOWN;
         String httpMethod = request.getMethod().name();
+        // Read the capture the UriTemplateHandler left immediately before us, while it is still
+        // ours; read-and-clear means this happens exactly once per call.
+        DestinationUriResolver.Resolved destinationUri = safeResolveDestinationUri(request);
+        String inboundUri = safeResolveInboundUri();
+        String operation = safeResolveOperation(request);
 
         try {
             String hint = request.getHeaders().getFirst(this.properties.serviceNameHintHeader());
@@ -103,11 +150,18 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
             safeLogWarn(source, destination, stampingFailure);
         }
 
+        // Emitted BEFORE dispatch, so a call that never returns still leaves a record of the
+        // attempt (FR-031). Inside the same guard as every other telemetry step: a logging
+        // failure must neither delay the request nor break it (Constitution Principle I).
+        safeLogRequest(new OutboundCallRecord(source, destination, httpMethod, null, null, null,
+                null, destinationUri.logValue(), inboundUri, operation, startedAt));
+
         ClientHttpResponse rawResponse;
         try {
             rawResponse = execution.execute(request, body);
         } catch (IOException | RuntimeException transportFailure) {
-            recordNetworkError(source, destination, httpMethod, startedAt);
+            recordNetworkError(source, destination, httpMethod, startedAt,
+                    destinationUri, inboundUri, operation, System.nanoTime() - startedNanos);
             throw transportFailure;
         }
 
@@ -120,9 +174,14 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
             ResponseCodeResult result =
                     buffered.peek(this.responseCodeExtractor, this.envelopeFieldExtractor);
 
+            // The log entry gets the log surface (raw path when untemplatable); the metric gets
+            // the metric surface (placeholder instead) — FR-004. Operation still awaits US2.
             safeLog(new OutboundCallRecord(source, destination, httpMethod, statusCode,
-                    statusGroup, result.rawCode(), buffered.peekedMessage(), startedAt));
-            safeRecordMetrics(destination, result.outcome(), statusGroup);
+                    statusGroup, result.rawCode(), buffered.peekedMessage(),
+                    destinationUri.logValue(), inboundUri, operation, startedAt));
+            safeRecordMetrics(destination, result.outcome(), statusGroup,
+                    destinationUri.metricValue(), inboundUri, operation,
+                    System.nanoTime() - startedNanos);
 
             return buffered;
         } catch (Exception instrumentationFailure) {
@@ -133,10 +192,58 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
         }
     }
 
-    private void recordNetworkError(String source, String destination, String httpMethod, Instant startedAt) {
+    private void recordNetworkError(String source, String destination, String httpMethod,
+                                    Instant startedAt, DestinationUriResolver.Resolved destinationUri,
+                                    String inboundUri, String operation, long elapsedNanos) {
         safeLog(new OutboundCallRecord(source, destination, httpMethod, null,
-                HttpStatusGroup.NETWORK_ERROR, null, null, startedAt));
-        safeRecordMetrics(destination, Outcome.ABSENT, HttpStatusGroup.NETWORK_ERROR);
+                HttpStatusGroup.NETWORK_ERROR, null, null,
+                destinationUri.logValue(), inboundUri, operation, startedAt));
+        safeRecordMetrics(destination, Outcome.ABSENT, HttpStatusGroup.NETWORK_ERROR,
+                destinationUri.metricValue(), inboundUri, operation, elapsedNanos);
+    }
+
+    /**
+     * Reads the operation header under its own guard. Read-only: the header is never modified, so
+     * a value rejected for telemetry still reaches the destination untouched (FR-024).
+     */
+    private String safeResolveOperation(HttpRequest request) {
+        try {
+            return this.operationResolver.resolve(
+                    request.getHeaders().getFirst(OperationResolver.HEADER_NAME));
+        } catch (Exception resolutionFailure) {
+            return OperationResolver.UNDEFINED;
+        }
+    }
+
+    /**
+     * Resolves the destination URI under its own guard. A resolution failure costs the dimension,
+     * never the call (FR-037).
+     */
+    private DestinationUriResolver.Resolved safeResolveDestinationUri(HttpRequest request) {
+        try {
+            return this.destinationUriResolver.resolve(request.getURI());
+        } catch (Exception resolutionFailure) {
+            return new DestinationUriResolver.Resolved(
+                    DestinationUriResolver.UNKNOWN, DestinationUriResolver.UNKNOWN);
+        }
+    }
+
+    /** Same contract as above for the inbound URI. */
+    private String safeResolveInboundUri() {
+        try {
+            return this.inboundUriResolver.resolve();
+        } catch (Exception resolutionFailure) {
+            return DestinationUriResolver.UNKNOWN;
+        }
+    }
+
+    /** Same contract as {@link #safeLog}, for the send-time entry. */
+    private void safeLogRequest(OutboundCallRecord record) {
+        try {
+            this.callLogger.logRequest(record);
+        } catch (Exception loggingFailure) {
+            // The request has not been dispatched yet and must not be affected by this.
+        }
     }
 
     /** Emits the log entry, absorbing any failure: telemetry is best-effort, the call is not. */
@@ -152,12 +259,15 @@ public class OutboundCallInterceptor implements ClientHttpRequestInterceptor {
      * Increments the counter when a recorder exists, under its own guard so that a metrics
      * failure can neither break the call nor suppress the log entry that precedes it.
      */
-    private void safeRecordMetrics(String destination, Outcome outcome, String statusGroup) {
+    private void safeRecordMetrics(String destination, Outcome outcome, String statusGroup,
+                                   String destinationUri, String inboundUri, String operation,
+                                   long elapsedNanos) {
         if (this.outboundCallMetrics == null) {
             return;
         }
         try {
-            this.outboundCallMetrics.record(destination, outcome, statusGroup);
+            this.outboundCallMetrics.record(destination, outcome, statusGroup,
+                    destinationUri, inboundUri, operation, elapsedNanos);
         } catch (Exception metricsFailure) {
             // Same contract as logging: telemetry is best-effort.
         }

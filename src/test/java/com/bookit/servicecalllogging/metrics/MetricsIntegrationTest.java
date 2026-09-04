@@ -69,13 +69,19 @@ class MetricsIntegrationTest {
         return restTemplate;
     }
 
+    /**
+     * Total count across every series matching these three tags — see the note on
+     * {@link #counter(MeterRegistry, String, String, String)}. Aggregates away the URI dimensions
+     * spec 003 added, so calls to different paths still sum into one total (FR-001, FR-029).
+     */
     private static double count(MeterRegistry registry, String destination, String outcome, String statusGroup) {
-        Counter counter = registry.find("http.outbound.calls.total")
+        return registry.find("http.outbound.calls.total")
                 .tag("destination", destination)
                 .tag("outcome", outcome)
                 .tag("http_status_group", statusGroup)
-                .counter();
-        return counter == null ? 0 : counter.count();
+                .counters().stream()
+                .mapToDouble(Counter::count)
+                .sum();
     }
 
     @Test
@@ -319,13 +325,86 @@ class MetricsIntegrationTest {
                 });
     }
 
+    /**
+     * Total count across every series matching these three tags.
+     *
+     * <p>Sums rather than taking a single counter, because spec 003 added the destination-URI and
+     * inbound-URI dimensions: two calls to the same destination on different paths are now
+     * legitimately separate series, which is the entire point of the URI dimension (FR-001). This
+     * helper asserts a total, so it must aggregate away the dimensions it does not name — the same
+     * thing a consumer's dashboard query does, and the reason FR-029 says such queries keep
+     * working. Written to stay correct when User Story 2 adds the operation dimension too.
+     */
     private static double counter(MeterRegistry registry, String destination, String outcome,
                                   String statusGroup) {
-        Counter counter = registry.find("http.outbound.calls.total")
+        java.util.Collection<Counter> matching = registry.find("http.outbound.calls.total")
                 .tag("destination", destination)
                 .tag("outcome", outcome)
                 .tag("http_status_group", statusGroup)
-                .counter();
-        return counter == null ? -1 : counter.count();
+                .counters();
+        return matching.isEmpty() ? -1 : matching.stream().mapToDouble(Counter::count).sum();
+    }
+
+    // ===== spec 003 (T051) — end-state tag-set check across both meters =====
+
+    @Test
+    void bothMetersCarryIdenticalTagSetsAndExactlyTheDeclaredKeys() {
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            org.springframework.web.client.RestTemplate restTemplate =
+                    context.getBean(org.springframework.boot.web.client.RestTemplateBuilder.class).build();
+            restTemplate.getForObject(this.server.url("/accounts/{id}"), String.class, 7);
+
+            MeterRegistry registry = context.getBean(MeterRegistry.class);
+            java.util.Set<String> counterKeys = registry.find("http.outbound.calls.total")
+                    .counters().stream().findFirst().orElseThrow()
+                    .getId().getTags().stream()
+                    .map(io.micrometer.core.instrument.Tag::getKey)
+                    .collect(java.util.stream.Collectors.toSet());
+            java.util.Set<String> timerKeys = registry.find("http.outbound.calls.latency")
+                    .timers().stream().findFirst().orElseThrow()
+                    .getId().getTags().stream()
+                    .map(io.micrometer.core.instrument.Tag::getKey)
+                    .collect(java.util.stream.Collectors.toSet());
+
+            assertThat(counterKeys).containsExactlyInAnyOrder(
+                    "destination", "outcome", "http_status_group",
+                    "destination_uri", "inbound_uri", "operation");
+            assertThat(timerKeys)
+                    .as("identical by construction: both meters are tagged from one shared assembly")
+                    .isEqualTo(counterKeys);
+        });
+    }
+
+    @Test
+    void theOutcomeTagsThreeValuesAllSurviveTheTagAdditionsOnBothMeters() {
+        // FR-027 end-state re-check. The red test for this lives in LatencyDistributionTest
+        // (T036), ahead of the timer's implementation; this confirms the spec-003 tag additions
+        // did not perturb it once everything is wired together.
+        this.runner.run(context -> {
+            org.springframework.web.client.RestTemplate restTemplate =
+                    context.getBean(org.springframework.boot.web.client.RestTemplateBuilder.class).build();
+
+            this.server.respondWith(200, "{\"responseCode\":0}");
+            restTemplate.getForObject(this.server.url("/ok"), String.class);
+            this.server.respondWith(200, "{\"responseCode\":9}");
+            restTemplate.getForObject(this.server.url("/bad"), String.class);
+            this.server.respondWith(200, "not json at all");
+            restTemplate.getForObject(this.server.url("/absent"), String.class);
+
+            MeterRegistry registry = context.getBean(MeterRegistry.class);
+            for (String meter : new String[]{"http.outbound.calls.total", "http.outbound.calls.latency"}) {
+                java.util.Set<String> outcomes = registry.find(meter).meters().stream()
+                        .flatMap(m -> m.getId().getTags().stream())
+                        .filter(t -> t.getKey().equals("outcome"))
+                        .map(io.micrometer.core.instrument.Tag::getValue)
+                        .collect(java.util.stream.Collectors.toSet());
+
+                assertThat(outcomes)
+                        .as("%s must keep all three outcome values distinct, none collapsed", meter)
+                        .containsExactlyInAnyOrder("success", "failure", "absent");
+            }
+        });
     }
 }

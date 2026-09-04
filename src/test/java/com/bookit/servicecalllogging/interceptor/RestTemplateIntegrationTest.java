@@ -348,4 +348,137 @@ class RestTemplateIntegrationTest {
                     assertThat(body).isEqualTo(payload);
                 });
     }
+
+    // ===== spec 003 (T026) — the blocking path captures the template =====
+
+    @Test
+    void theCapturedTemplateIsReportedRatherThanTheExpandedPath() {
+        // The whole reason CapturingUriTemplateHandler exists: a RestTemplate interceptor is
+        // handed an expanded URI, so without the capture this would report /accounts/42/transfers
+        // in the log and `unresolved` on the metric (research.md §1).
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            lenient(context.getBean(RestTemplateBuilder.class)).getForObject(
+                    this.server.url("/accounts/{id}/transfers"), String.class, 42);
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(CallLogger.class);
+            assertThat(logger.onlyRecord().destinationUri())
+                    .as("the template the developer wrote, not the URI the client built")
+                    .isEqualTo("/accounts/{id}/transfers");
+        });
+    }
+
+    @Test
+    void aPreBuiltUriDegradesToItsRawPathInTheLog() {
+        // exchange(URI, ...) bypasses the UriTemplateHandler, so no capture happens — and the
+        // expanded-URI equality check means no earlier template is misattributed to this call.
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            lenient(context.getBean(RestTemplateBuilder.class))
+                    .getForObject(java.net.URI.create(this.server.url("/accounts/99/transfers")),
+                            String.class);
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(CallLogger.class);
+            assertThat(logger.onlyRecord().destinationUri()).isEqualTo("/accounts/99/transfers");
+        });
+    }
+
+    @Test
+    void theInboundUriIsUnknownWhenNoRequestIsBeingHandled() {
+        // This test is not serving an inbound request, which is the scheduled-task case (FR-006).
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            lenient(context.getBean(RestTemplateBuilder.class))
+                    .getForObject(this.server.url("/x"), String.class);
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(CallLogger.class);
+            assertThat(logger.onlyRecord().inboundUri()).isEqualTo("unknown");
+        });
+    }
+
+    @Test
+    void aQueryStringOnTheWireNeverReachesTheRecordedUri() {
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            lenient(context.getBean(RestTemplateBuilder.class))
+                    .getForObject(this.server.url("/search?token=SECRET&q=bob"), String.class);
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(CallLogger.class);
+            assertThat(logger.onlyRecord().destinationUri())
+                    .isEqualTo("/search")
+                    .doesNotContain("SECRET", "token");
+        });
+    }
+
+    // ===== spec 003 (T029) — the operation header is READ, never touched =====
+
+    @Test
+    void theOperationHeaderReachesTheDownstreamServiceUnchanged() {
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+            headers.set("X-Operation", "SendMoney");
+
+            lenient(context.getBean(RestTemplateBuilder.class)).exchange(
+                    this.server.url("/charge"), org.springframework.http.HttpMethod.GET,
+                    new org.springframework.http.HttpEntity<>(headers), String.class);
+
+            assertThat(this.server.lastRequestHeader("X-Operation")).isEqualTo("SendMoney");
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(CallLogger.class);
+            assertThat(logger.onlyRecord().operation()).isEqualTo("SendMoney");
+        });
+    }
+
+    @Test
+    void aValueTelemetryRejectsStillReachesTheDestinationByteIdentical() {
+        // FR-024 — the decisive case. The shape bound governs TELEMETRY only; it must never
+        // alter, strip or rewrite what the caller put on the wire. A starter that "cleaned up" a
+        // header would be changing the call it is supposed to be observing.
+        this.server.respondWith(200, "{\"responseCode\":0}");
+        // Rejected by the shape bound (spaces, slash, hash) but plain ASCII, so the transport
+        // itself cannot be blamed for any difference — HTTP header values are Latin-1, and a
+        // non-ASCII character would be mangled by the wire rather than by this starter.
+        String rejected = "send money/v2 acct#12345";
+
+        this.runner.run(context -> {
+            org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+            headers.set("X-Operation", rejected);
+
+            lenient(context.getBean(RestTemplateBuilder.class)).exchange(
+                    this.server.url("/charge"), org.springframework.http.HttpMethod.GET,
+                    new org.springframework.http.HttpEntity<>(headers), String.class);
+
+            assertThat(this.server.lastRequestHeader("X-Operation"))
+                    .as("the caller's value must arrive exactly as sent")
+                    .isEqualTo(rejected);
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(CallLogger.class);
+            assertThat(logger.onlyRecord().operation())
+                    .as("but telemetry records the fallback, not the rejected value (FR-022)")
+                    .isEqualTo("undefined");
+        });
+    }
+
+    @Test
+    void theStarterNeverAddsAnOperationHeaderTheCallerDidNotSet() {
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            lenient(context.getBean(RestTemplateBuilder.class))
+                    .getForObject(this.server.url("/charge"), String.class);
+
+            assertThat(this.server.lastRequestHeader("X-Operation"))
+                    .as("read-only: the starter must not synthesise this header")
+                    .isNull();
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(CallLogger.class);
+            assertThat(logger.onlyRecord().operation()).isEqualTo("undefined");
+        });
+    }
 }

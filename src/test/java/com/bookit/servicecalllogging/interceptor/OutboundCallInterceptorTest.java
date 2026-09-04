@@ -26,8 +26,7 @@ class OutboundCallInterceptorTest {
 
     private static final ServiceCallLoggingProperties DEFAULTS = new ServiceCallLoggingProperties(
             true, "X-Source-Service", "X-Destination-Service", "service_name", 1_048_576,
-            new ServiceCallLoggingProperties.Metrics(
-                    "http.outbound.calls", "destination", "outcome", "http_status_group"),
+            com.bookit.servicecalllogging.testsupport.TestProperties.defaultMetrics(),
             java.util.List.of());
 
     private RecordingCallLogger callLogger;
@@ -146,6 +145,50 @@ class OutboundCallInterceptorTest {
                 }))
                 .isInstanceOf(IOException.class)
                 .hasMessage("connection refused");
+    }
+
+    // ===== spec 003 (T038) — elapsed duration is recorded even without a response =====
+
+    @Test
+    void latencyIsRecordedOnASuccessfulCall() throws Exception {
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry registry =
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        OutboundCallInterceptor instrumented = new OutboundCallInterceptor(
+                new DestinationNameResolver("my-service"), new SimpleJsonExtractor(),
+                this.callLogger,
+                new com.bookit.servicecalllogging.metrics.OutboundCallMetrics(registry, DEFAULTS),
+                DEFAULTS);
+
+        instrumented.intercept(request("http://svc:8080/x"), new byte[0],
+                (req, body) -> new FakeClientHttpResponse("{\"responseCode\":0}".getBytes(StandardCharsets.UTF_8)));
+
+        io.micrometer.core.instrument.Timer timer =
+                registry.find("http.outbound.calls.latency").timer();
+        assertThat(timer).as("the latency timer must be recorded").isNotNull();
+        assertThat(timer.count()).isEqualTo(1);
+    }
+
+    @Test
+    void latencyIsStillRecordedWhenTheCallFailsBeforeAnyResponse() {
+        // FR-016 — a call that never produced a response still contributes its elapsed time.
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry registry =
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        OutboundCallInterceptor instrumented = new OutboundCallInterceptor(
+                new DestinationNameResolver("my-service"), new SimpleJsonExtractor(),
+                this.callLogger,
+                new com.bookit.servicecalllogging.metrics.OutboundCallMetrics(registry, DEFAULTS),
+                DEFAULTS);
+
+        assertThatThrownBy(() -> instrumented.intercept(request("http://svc:8080/x"), new byte[0],
+                (req, body) -> {
+                    throw new IOException("connection refused");
+                })).isInstanceOf(IOException.class);
+
+        io.micrometer.core.instrument.Timer timer = registry.find("http.outbound.calls.latency")
+                .tag("http_status_group", "network-error")
+                .timer();
+        assertThat(timer).as("elapsed time must be recorded on the failure path too").isNotNull();
+        assertThat(timer.count()).isEqualTo(1);
     }
 
     @Test

@@ -6,7 +6,11 @@ import com.bookit.servicecalllogging.ServiceCallLoggingProperties;
 import com.bookit.servicecalllogging.interceptor.OutboundCallInterceptor;
 import com.bookit.servicecalllogging.logging.CallLogger;
 import com.bookit.servicecalllogging.metrics.OutboundCallMetrics;
+import com.bookit.servicecalllogging.operation.OperationResolver;
 import com.bookit.servicecalllogging.resolver.DestinationNameResolver;
+import com.bookit.servicecalllogging.uri.CapturingUriTemplateHandler;
+import com.bookit.servicecalllogging.uri.DestinationUriResolver;
+import com.bookit.servicecalllogging.uri.InboundUriResolver;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -41,7 +45,10 @@ class RestTemplateInstrumentationConfiguration {
                                                     CallLogger callLogger,
                                                     ObjectProvider<OutboundCallMetrics> outboundCallMetrics,
                                                     ServiceCallLoggingProperties properties,
-                                                    ObjectProvider<EnvelopeFieldExtractor> envelopeFieldExtractor) {
+                                                    ObjectProvider<EnvelopeFieldExtractor> envelopeFieldExtractor,
+                                                    DestinationUriResolver destinationUriResolver,
+                                                    InboundUriResolver inboundUriResolver,
+                                                    OperationResolver operationResolver) {
         return new OutboundCallInterceptor(
                 destinationNameResolver,
                 responseCodeExtractor.getIfAvailable(() -> bytes -> Optional.empty()),
@@ -50,7 +57,15 @@ class RestTemplateInstrumentationConfiguration {
                 outboundCallMetrics.getIfAvailable(),
                 properties,
                 // Absent whenever Jackson is missing; the message is then simply never read.
-                envelopeFieldExtractor.getIfAvailable());
+                envelopeFieldExtractor.getIfAvailable(),
+                // The auto-configured singletons from ServiceCallLoggingAutoConfiguration (spec
+                // 003 remediation, T062). Passing these explicitly — rather than falling through
+                // to the constructor overload that creates its own defaults — is what makes the
+                // operation admission cap actually shared with the WebClient path and what lets a
+                // consumer-supplied override bean of any of the three take effect.
+                destinationUriResolver,
+                inboundUriResolver,
+                operationResolver);
     }
 
     /**
@@ -63,6 +78,14 @@ class RestTemplateInstrumentationConfiguration {
     @Bean
     @ConditionalOnMissingBean(name = "serviceCallLoggingRestTemplateCustomizer")
     RestTemplateCustomizer serviceCallLoggingRestTemplateCustomizer(OutboundCallInterceptor interceptor) {
-        return restTemplate -> restTemplate.getInterceptors().add(interceptor);
+        return restTemplate -> {
+            restTemplate.getInterceptors().add(interceptor);
+            // Spec 003 (T021): wrap the template's own handler so the URI template is captured
+            // where it is still known. Without this the interceptor only ever sees an expanded
+            // URI and every blocking-path call would report the `unresolved` placeholder in its
+            // destination-URI metric tag (research.md §1).
+            restTemplate.setUriTemplateHandler(
+                    new CapturingUriTemplateHandler(restTemplate.getUriTemplateHandler()));
+        };
     }
 }

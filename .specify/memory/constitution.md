@@ -1,15 +1,83 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: 1.0.0 → 1.1.0
+Version change: 1.2.0 → 1.3.0 (MINOR)
+
+Bump rationale: the Amendment Procedure's approval threshold is materially changed — from "at
+least two project maintainers" to "every active maintainer". That is altered governance guidance,
+not the removal or incompatible redefinition of a principle, and nothing previously compliant
+becomes non-compliant. MINOR per this document's own versioning policy.
+
+Sections modified:
+  Governance -> Amendment Procedure, steps 2 and 3 — approval threshold restated as *all active
+       maintainers* instead of *two*, with a new "Single-maintainer projects" clause; step 2 now
+       also REQUIRES the versioning assessment to be written into the Sync Impact Report.
+
+  Why this was necessary rather than cosmetic: this project has exactly one author, so a
+  two-approval threshold could never be met. That left the constitution holding an unsatisfiable
+  rule, which in practice meant amendments could only proceed by ignoring its own governance —
+  the worst of both worlds, since the rule protected nothing while making the audit trail
+  dishonest.
+
+  Supersedes an earlier attempt at the same fix: a clause exempting a named individual
+  ("the amendment procedure does not apply to him") had been added to step 1. It is removed here
+  for two reasons. First, it did not work — it was attached to the *Proposal* step, while the
+  two-maintainer threshold it was meant to lift lives in steps 2 and 3, so the block remained in
+  force. Second, governance that hardcodes a person's name stops being true the moment authorship
+  changes and says nothing about what happens when a second maintainer joins. The threshold
+  chosen instead is satisfiable today by one person and scales to two automatically.
+
+  Step 2's new written-assessment duty is a deliberate tightening, not a loosening: with a single
+  reviewer, the written record is the only remaining check on a hasty amendment, so it is made
+  mandatory rather than assumed.
+
+Principles modified: None. Principles added: None. Principles removed: None.
+Sections added: None. Sections removed: None.
+
+Ratification: approved by the sole active maintainer, per the procedure as revised here.
+
+Consequence for the pending feature: the v1.2.0 Principle VII expansion recorded below is RATIFIED,
+clearing the T003 gate that blocked Phase 3 — and therefore User Stories 1, 2 and 4 — in
+specs/003-uri-operation-latency-telemetry/.
+
+---
+
+Version change: 1.1.0 → 1.2.0 (MINOR)
+
+Bump rationale: Principle VII's permitted logged-field set is widened. No previously compliant
+behaviour becomes non-compliant, no principle is removed or redefined, and no consuming service
+must change anything — the definition of MINOR in this document's own versioning policy.
 
 Principles modified:
-  VII. Data Hygiene & Security — Rule expanded: the fixed, exhaustive logged-field set now
-       additionally permits an extracted business-outcome message/description string, logged
-       verbatim with no length bound or content filtering, but only when a consuming service has
-       configured or defaulted into message-field extraction. Rationale expanded to explain why
-       this field is treated differently from a raw request/response body. Verification
-       paragraph updated so the ArchUnit-permitted field set includes the new field.
+  VII. Data Hygiene & Security — Rule: the fixed, exhaustive logged-field set is restated as an
+       explicit numbered enumeration of nine entries (previously prose naming three) and now
+       additionally admits (7) the path component of the outbound call's destination URI, (8) the
+       path component of the inbound request URI the consuming service was handling, and (9) the
+       caller-supplied business operation name. Two new binding constraints accompany them: the
+       URI fields MUST be the path component only — never a scheme, host, port, userinfo
+       component, or query string, on any surface — and the operation name MUST be constrained to
+       a bounded length and a character set excluding whitespace and separators, with any
+       out-of-shape value replaced by a fixed literal.
+
+       Enumeration note: entries (3) HTTP method, (4) HTTP status and status group, and (5) the
+       call's initiation instant were already being logged under specs 001/002 and were already
+       permitted by the enforcing test's hard-coded list, but the principle's prose named only
+       three fields. Listing them corrects a pre-existing drift between the principle's prose and
+       its own Verification clause; it grants no new permission and changes no behaviour.
+
+       VII. Rationale — expanded to argue that the three new fields are admitted on a STRONGER
+       basis than the message field ratified in v1.1.0, because each is bounded by construction
+       rather than by adopter judgement: a path-only field cannot represent the userinfo or query
+       components where credentials and tokens live, so the guarantee is structural rather than a
+       redaction step that could be forgotten. Explicitly states that admitting a URI's path does
+       not admit its query string, and admitting an operation name does not admit arbitrary
+       caller-supplied metadata.
+
+       VII. Verification — strengthened three ways: (a) the static analysis rule MUST be updated in
+       the same change that adds a field, and NEVER before the permitting amendment is ratified;
+       (b) an adversarial test MUST prove a URI carrying userinfo credentials and a query string
+       leaks neither into a log entry nor a metric tag; (c) an adversarial test MUST prove
+       out-of-shape operation values yield only the fixed replacement literal.
 
 Principles added: None.
 Principles removed: None.
@@ -17,11 +85,29 @@ Principles removed: None.
 Sections added: None.
 Sections removed: None.
 
+Ratification status:
+  RATIFIED by the project's sole active maintainer, which is the complete approval set the
+  Amendment Procedure requires as revised in v1.3.0. The Principle VII expansion recorded here is
+  therefore in force, and the T003 gate in specs/003-uri-operation-latency-telemetry/tasks.md —
+  which blocked Phase 3, and with it User Stories 1, 2 and 4 — is cleared.
+
 Follow-up required (tracked outside this document, not template changes):
-  - `DataHygieneArchTest` (src/test/java/.../security/DataHygieneArchTest.java) MUST be updated
-    to permit the new logged field name before the change that relies on this amendment merges.
-  - This amendment was drafted to unblock `specs/002-configurable-envelope-fields/` (FR-013),
-    whose plan.md flagged the prior wording as a blocking Constitution Check gate.
+  - `DataHygieneArchTest.theLoggedFieldSetIsExactlyTheOneTheConstitutionPermits`
+    (src/test/java/.../security/DataHygieneArchTest.java) hard-codes the permitted field names and
+    MUST be extended with `destinationUri`, `inboundUri` and `operation` — but ONLY AFTER the two
+    maintainer approvals above. Extending it first would make the gate assert a permission the
+    constitution had not yet granted, which is the single failure mode this gate exists to prevent.
+  - The two new adversarial tests required by the strengthened Verification clause MUST be added
+    with the fields (planned as `UriDataHygieneTest` and `MetricCardinalityTest`).
+  - README's logged-field table grows from seven rows to ten, per Principle VIII.
+  - This amendment unblocks `specs/003-uri-operation-latency-telemetry/`, whose plan.md records
+    this as a BLOCKING Constitution Check finding. Its FR-005 already requires path-only recording
+    and its FR-020/FR-021 already require the bounded operation shape, so the spec and this
+    amendment agree; no spec revision is owed.
+
+Prior amendment retained for context:
+  v1.1.0 (2026-09-01) admitted the extracted business-outcome message string, unblocking
+  `specs/002-configurable-envelope-fields/` (FR-013).
 
 Deferred TODOs: None — all placeholder tokens resolved.
 -->
@@ -169,12 +255,27 @@ caller.
 
 **Rule**: The starter MUST NOT log credentials, tokens, `Authorization` header values, `Cookie`
 header values, PII, full request bodies, or full response bodies. The complete set of fields
-that MAY be emitted is fixed and exhaustive: the source/destination correlation header values,
-the parsed `responseCode` integer, and — only when a consuming service has configured or
-defaulted into response-message extraction — the extracted business-outcome message/description
-string, logged verbatim with no length bound or content filtering. The set of logged fields MUST
-be documented in the project README. Nothing MAY be logged that a consumer has not been
-explicitly told to expect.
+that MAY be emitted is fixed and exhaustive:
+
+1. the source/destination correlation header values;
+2. the parsed `responseCode` integer;
+3. the outgoing request's HTTP method;
+4. the received HTTP status code and its status-group classification;
+5. the instant at which the call was initiated;
+6. only when a consuming service has configured or defaulted into response-message extraction —
+   the extracted business-outcome message/description string, logged verbatim with no length
+   bound or content filtering;
+7. the **path component** of the outbound call's destination URI;
+8. the **path component** of the inbound request URI the consuming service was handling when it
+   made the call; and
+9. the caller-supplied business operation name.
+
+Fields 7 and 8 MUST be recorded as the URI path component ONLY. A scheme, host, port, userinfo
+component, or query string MUST NEVER be emitted as part of either field, on any surface.
+Field 9 MUST be constrained to a bounded shape — a documented maximum length and a documented
+character set that excludes whitespace and separators — with any value outside that shape
+replaced by a fixed literal. The set of logged fields MUST be documented in the project README.
+Nothing MAY be logged that a consumer has not been explicitly told to expect.
 
 **Rationale**: This starter runs inside services that handle sensitive business and user data
 across many independent teams. Accidental credential or PII leakage through a shared library
@@ -188,15 +289,37 @@ default for message extraction is making a deliberate, informed choice about a f
 and understands from an API it has chosen to call. A service that configures nothing still reads
 the message from the default field name (`message`) and logs it, since that default is part of the
 built-in combination — the exception is therefore live for every adopter, not only those who
-configure a combination explicitly, and is accepted on that basis. This is a narrower
-exception than it may first appear: it does not relax the prohibition on credentials, tokens,
-`Authorization`/`Cookie` values, PII, or full bodies, all of which remain absolute.
+configure a combination explicitly, and is accepted on that basis.
+
+The two URI path fields and the operation name are admitted on a **stronger** basis than the
+message field, not a weaker one, because each is bounded by construction rather than by adopter
+judgement. Recording only a URI's path component makes the credential guarantee structural: a
+credential lives in a URI's userinfo component and a token in its query string, and both belong to
+parts of the URI that a path-only field cannot represent. There is therefore no redaction step
+that could be forgotten for some future way of supplying a URI — the unsafe values are not
+reachable rather than merely filtered. The operation name is likewise constrained to a bounded
+length and a character set excluding whitespace and separators, so it can carry a name
+(`SendMoney`) but is a poor vehicle for a smuggled identifier or free-text payload, and a value
+failing that constraint is replaced rather than truncated. All three fields also serve the
+principle's own transparency requirement: they name the caller's endpoint, the callee's endpoint,
+and the business intent — the three things an operator needs to act on an incident, and none of
+which is sensitive on its own.
+
+This is a narrower exception than it may first appear: it does not relax the prohibition on
+credentials, tokens, `Authorization`/`Cookie` values, PII, or full bodies, all of which remain
+absolute. In particular, admitting a URI's path does NOT admit its query string, and admitting an
+operation name does NOT admit arbitrary caller-supplied metadata.
 
 **Verification**: A static analysis rule (ArchUnit or equivalent) MUST assert that no log
-statement in the instrumentation path references field names outside the declared set
-(correlation header names, `responseCode`, and the extracted message field). A dedicated
-integration test MUST assert that a request carrying an `Authorization` header produces no log
-output containing the string "Authorization" or any substring of the header value.
+statement in the instrumentation path references field names outside the declared set enumerated
+above, and MUST be updated in the same change that adds any field to that set — never before the
+amendment permitting it is ratified. A dedicated integration test MUST assert that a request
+carrying an `Authorization` header produces no log output containing the string "Authorization"
+or any substring of the header value. Two further tests are REQUIRED for the URI and operation
+fields: (a) a call to a URI carrying userinfo credentials and a query string MUST produce no log
+output and no metric tag containing any part of either; and (b) a sequence of calls supplying
+operation values that violate the documented shape MUST produce only the fixed replacement
+literal. Both MUST be adversarial tests asserting the guarantee, not inspections of it.
 
 ---
 
@@ -335,11 +458,25 @@ artifact, this constitution takes precedence.
 **Amendment Procedure**:
 1. **Proposal**: Any contributor may propose an amendment by opening a pull request against
    this file with a written rationale explaining the change and its versioning classification.
-2. **Review**: The amendment MUST be reviewed by at least two project maintainers. The review
-   MUST assess whether the change is backward compatible (PATCH), additive (MINOR), or breaking
-   (MAJOR) per the versioning policy below.
-3. **Approval**: The amendment is ratified when at least two maintainers approve the PR and no
+2. **Review**: The amendment MUST be reviewed by **every active maintainer of the project**. The
+   review MUST assess whether the change is backward compatible (PATCH), additive (MINOR), or
+   breaking (MAJOR) per the versioning policy below, and that assessment MUST be written into the
+   Sync Impact Report rather than left implicit.
+3. **Approval**: The amendment is ratified when every active maintainer has approved and no
    maintainer has raised an unresolved objection.
+
+   **Single-maintainer projects.** This project currently has one maintainer, so "every active
+   maintainer" is that one person and a second approval cannot be obtained. The threshold is
+   deliberately written as *all active maintainers* rather than *two* so that it is always
+   satisfiable and never becomes a rule that has to be quietly ignored, and so that it needs no
+   amendment if a second maintainer joins — the bar rises to two by its own terms. Naming an
+   individual here was considered and rejected: governance that hardcodes a person stops being
+   true the moment authorship changes, and a personal exemption attached to the *proposal* step
+   would not have lifted the approval threshold in steps 2 and 3 in any case. What the
+   multi-reviewer rule was protecting — that an amendment is deliberate, classified, and justified
+   in writing before anything relies on it — is preserved by the written assessment now mandatory
+   in step 2 and by the Sync Impact Report in step 4, both of which a sole maintainer can and must
+   still produce.
 4. **Migration & Propagation**: A MAJOR amendment MUST include: (a) a migration note for
    consuming teams describing what changed and the required action; (b) updates to any dependent
    SpecKit templates (plan-template, spec-template, tasks-template) that reference the amended
@@ -360,4 +497,4 @@ violation MUST be either: (a) explicitly justified in the plan's complexity-trac
 and accepted by a maintainer before the PR is opened; or (b) rejected at code review without
 exception. Unjustified violations are merge blockers, not warnings.
 
-**Version**: 1.1.0 | **Ratified**: 2026-08-27 | **Last Amended**: 2026-09-01
+**Version**: 1.3.0 | **Ratified**: 2026-08-27 | **Last Amended**: 2026-09-03

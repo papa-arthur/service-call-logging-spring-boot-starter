@@ -126,6 +126,52 @@ class OutboundCallExchangeFilterTest {
         assertThat(this.callLogger.onlyRecord().httpStatusGroup()).isEqualTo("network-error");
     }
 
+    // ===== spec 003 (T038) — elapsed duration on the reactive path =====
+
+    private WebClient instrumentedClient(io.micrometer.core.instrument.MeterRegistry registry) {
+        return WebClient.builder()
+                .filter(new OutboundCallExchangeFilter(
+                        new DestinationNameResolver("my-service"), new JacksonResponseCodeExtractor(),
+                        this.callLogger,
+                        new com.bookit.servicecalllogging.metrics.OutboundCallMetrics(
+                                registry, TestProperties.defaults()),
+                        TestProperties.defaults()))
+                .build();
+    }
+
+    @Test
+    void latencyIsRecordedOnTheReactivePath() {
+        this.server.respondWith(200, "{\"responseCode\":0}");
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry registry =
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+
+        instrumentedClient(registry).get().uri(this.server.url("/x"))
+                .retrieve().bodyToMono(String.class).block(TIMEOUT);
+
+        io.micrometer.core.instrument.Timer timer =
+                registry.find("http.outbound.calls.latency").timer();
+        assertThat(timer).as("the latency timer must be recorded on the reactive path").isNotNull();
+        assertThat(timer.count()).isEqualTo(1);
+    }
+
+    @Test
+    void latencyIsStillRecordedWhenTheReactiveCallFailsBeforeAnyResponse() throws IOException {
+        // FR-016 — the onErrorResume path must contribute its elapsed time too.
+        String unreachable = StubHttpServer.unreachableUrl();
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry registry =
+                new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+
+        assertThatThrownBy(() -> instrumentedClient(registry).get().uri(unreachable + "/x")
+                .retrieve().bodyToMono(String.class).block(TIMEOUT))
+                .isInstanceOf(WebClientRequestException.class);
+
+        io.micrometer.core.instrument.Timer timer = registry.find("http.outbound.calls.latency")
+                .tag("http_status_group", "network-error")
+                .timer();
+        assertThat(timer).as("elapsed time must be recorded on the reactive failure path").isNotNull();
+        assertThat(timer.count()).isEqualTo(1);
+    }
+
     @Test
     void statusGroupsAreClassifiedFromTheReactiveResponse() {
         this.server.respondWith(404, "{\"responseCode\":1}");

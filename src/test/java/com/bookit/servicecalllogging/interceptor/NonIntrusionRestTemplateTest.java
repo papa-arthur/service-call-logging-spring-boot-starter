@@ -25,6 +25,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Constitution Principle I — the Non-Intrusion merge gate for the blocking path.
@@ -242,5 +243,212 @@ class NonIntrusionRestTemplateTest {
         }).doesNotThrowAnyException();
 
         assertThat(this.callLogger.onlyRecord().responseCode()).isEqualTo(0);
+    }
+
+    // ---- spec 003 (T049): every new step made to throw in turn ------------------------
+
+    /**
+     * Builds a RestTemplate whose spec-003 collaborators are injected, so each new step can be
+     * made to explode independently. Any one of them failing must leave the response
+     * byte-for-byte identical and the call's outcome untouched (FR-037, SC-005).
+     */
+    private RestTemplate withCollaborators(
+            com.bookit.servicecalllogging.uri.DestinationUriResolver destinationUriResolver,
+            com.bookit.servicecalllogging.uri.InboundUriResolver inboundUriResolver,
+            com.bookit.servicecalllogging.operation.OperationResolver operationResolver,
+            com.bookit.servicecalllogging.metrics.OutboundCallMetrics metrics,
+            CallLogger logger) {
+        RestTemplate restTemplate = new RestTemplate();
+        restTemplate.getInterceptors().add(new OutboundCallInterceptor(
+                new DestinationNameResolver("my-service"), new JacksonResponseCodeExtractor(),
+                logger, metrics, TestProperties.defaults(), null,
+                destinationUriResolver, inboundUriResolver, operationResolver));
+        return restTemplate;
+    }
+
+    private static final String PAYLOAD = "{\"responseCode\":0,\"message\":\"OK\"}";
+
+    private void assertCallSurvives(RestTemplate restTemplate) {
+        assertThatCode(() -> {
+            String body = restTemplate.getForObject(this.server.url("/accounts/7"), String.class);
+            assertThat(body)
+                    .as("the response must reach the caller byte-for-byte regardless")
+                    .isEqualTo(PAYLOAD);
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    void aDestinationUriResolverThatThrowsLosesTheDimensionButNotTheCall() {
+        this.server.respondWith(200, PAYLOAD);
+
+        assertCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver() {
+                    @Override
+                    public Resolved resolve(java.net.URI requestUri) {
+                        throw new IllegalStateException("destination uri resolver exploded");
+                    }
+                },
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                null, this.callLogger));
+    }
+
+    @Test
+    void anInboundUriResolverThatThrowsLosesTheDimensionButNotTheCall() {
+        this.server.respondWith(200, PAYLOAD);
+
+        assertCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver(),
+                new com.bookit.servicecalllogging.uri.InboundUriResolver() {
+                    @Override
+                    public String resolve() {
+                        throw new IllegalStateException("inbound uri resolver exploded");
+                    }
+                },
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                null, this.callLogger));
+    }
+
+    @Test
+    void anOperationResolverThatThrowsLosesTheDimensionButNotTheCall() {
+        this.server.respondWith(200, PAYLOAD);
+
+        assertCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver(),
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver() {
+                    @Override
+                    public String resolve(String headerValue) {
+                        throw new IllegalStateException("operation resolver exploded");
+                    }
+                },
+                null, this.callLogger));
+    }
+
+    @Test
+    void aTimerRecordThatThrowsLosesTheMetricButNotTheCall() {
+        this.server.respondWith(200, PAYLOAD);
+        com.bookit.servicecalllogging.metrics.OutboundCallMetrics exploding =
+                new com.bookit.servicecalllogging.metrics.OutboundCallMetrics(
+                        new io.micrometer.core.instrument.simple.SimpleMeterRegistry(),
+                        TestProperties.defaults()) {
+                    @Override
+                    public void record(String destination,
+                                       com.bookit.servicecalllogging.metrics.Outcome outcome,
+                                       String httpStatusGroup, String destinationUri,
+                                       String inboundUri, String operation, long elapsedNanos) {
+                        throw new IllegalStateException("timer exploded");
+                    }
+                };
+
+        assertCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver(),
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                exploding, this.callLogger));
+    }
+
+    @Test
+    void aSendTimeLogEntryThatThrowsDoesNotPreventDispatchOrBreakTheCall() {
+        // The riskiest of the new steps: it runs BEFORE the request is dispatched, so a failure
+        // here could plausibly stop the call from happening at all.
+        this.server.respondWith(200, PAYLOAD);
+        CallLogger explodingOnRequest = new CallLogger() {
+            @Override
+            public void logRequest(OutboundCallRecord record) {
+                throw new IllegalStateException("send-time entry exploded");
+            }
+        };
+
+        assertCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver(),
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                null, explodingOnRequest));
+    }
+
+    @Test
+    void bothLogEntriesThrowingStillLeavesTheCallIntact() {
+        this.server.respondWith(200, PAYLOAD);
+        CallLogger explodingOnBoth = new CallLogger() {
+            @Override
+            public void logRequest(OutboundCallRecord record) {
+                throw new IllegalStateException("send-time exploded");
+            }
+
+            @Override
+            public void log(OutboundCallRecord record) {
+                throw new IllegalStateException("response entry exploded");
+            }
+        };
+
+        assertCallSurvives(withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver(),
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                null, explodingOnBoth));
+    }
+
+    @Test
+    void everyNewStepThrowingAtOnceStillLeavesTheResponseByteForByteIdentical() {
+        // The worst case: nothing about this feature works, and the call must not notice.
+        this.server.respondWith(200, PAYLOAD);
+        byte[] uninstrumented = new RestTemplate().getForObject(this.server.url("/accounts/7"), byte[].class);
+
+        RestTemplate allBroken = withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver() {
+                    @Override
+                    public Resolved resolve(java.net.URI requestUri) {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                new com.bookit.servicecalllogging.uri.InboundUriResolver() {
+                    @Override
+                    public String resolve() {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                new com.bookit.servicecalllogging.operation.OperationResolver() {
+                    @Override
+                    public String resolve(String headerValue) {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                null,
+                new CallLogger() {
+                    @Override
+                    public void logRequest(OutboundCallRecord record) {
+                        throw new IllegalStateException("boom");
+                    }
+
+                    @Override
+                    public void log(OutboundCallRecord record) {
+                        throw new IllegalStateException("boom");
+                    }
+                });
+
+        byte[] viaBrokenStarter = allBroken.getForObject(this.server.url("/accounts/7"), byte[].class);
+
+        assertThat(viaBrokenStarter).isEqualTo(uninstrumented);
+    }
+
+    @Test
+    void aTransportFailureStillPropagatesUntouchedWithEveryNewStepBroken() throws IOException {
+        String unreachable = com.bookit.servicecalllogging.testsupport.StubHttpServer.unreachableUrl();
+
+        RestTemplate allBroken = withCollaborators(
+                new com.bookit.servicecalllogging.uri.DestinationUriResolver() {
+                    @Override
+                    public Resolved resolve(java.net.URI requestUri) {
+                        throw new IllegalStateException("boom");
+                    }
+                },
+                new com.bookit.servicecalllogging.uri.InboundUriResolver(),
+                new com.bookit.servicecalllogging.operation.OperationResolver(),
+                null, this.callLogger);
+
+        assertThatThrownBy(() -> allBroken.getForObject(unreachable + "/x", String.class))
+                .as("the original transport failure must reach the caller, not ours")
+                .isInstanceOf(org.springframework.web.client.ResourceAccessException.class);
     }
 }

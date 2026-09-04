@@ -288,4 +288,57 @@ class WebClientIntegrationTest {
                     assertThat(body).isEqualTo(payload);
                 });
     }
+
+    // ===== spec 003 (T026) — the reactive path reads the template from a request attribute =====
+
+    @Test
+    void theWebClientUriTemplateAttributeIsReportedRatherThanTheExpandedPath() {
+        // Different mechanism from the blocking path: DefaultWebClient publishes the template as
+        // a request attribute, so no ThreadLocal hand-off is involved (research.md §2). Same
+        // outcome, which is why each path needs its own proof.
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            context.getBean(WebClient.Builder.class).build()
+                    .get().uri(this.server.url("/accounts/{id}/transfers"), 42)
+                    .retrieve().bodyToMono(String.class).block(java.time.Duration.ofSeconds(20));
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(
+                    com.bookit.servicecalllogging.logging.CallLogger.class);
+            assertThat(logger.onlyRecord().destinationUri()).isEqualTo("/accounts/{id}/transfers");
+        });
+    }
+
+    @Test
+    void aPreBuiltUriOnTheReactivePathDegradesToItsRawPath() {
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            context.getBean(WebClient.Builder.class).build()
+                    .get().uri(java.net.URI.create(this.server.url("/accounts/77/transfers")))
+                    .retrieve().bodyToMono(String.class).block(java.time.Duration.ofSeconds(20));
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(
+                    com.bookit.servicecalllogging.logging.CallLogger.class);
+            assertThat(logger.onlyRecord().destinationUri()).isEqualTo("/accounts/77/transfers");
+        });
+    }
+
+    @Test
+    void theInboundUriFallsBackOnTheReactivePath() {
+        // FR-008 and the starter's existing documented limitation: context propagation across the
+        // reactive boundary is the consuming service's responsibility, so the fallback is expected
+        // here rather than treated as a defect.
+        this.server.respondWith(200, "{\"responseCode\":0}");
+
+        this.runner.run(context -> {
+            context.getBean(WebClient.Builder.class).build()
+                    .get().uri(this.server.url("/x"))
+                    .retrieve().bodyToMono(String.class).block(java.time.Duration.ofSeconds(20));
+
+            RecordingCallLogger logger = (RecordingCallLogger) context.getBean(
+                    com.bookit.servicecalllogging.logging.CallLogger.class);
+            assertThat(logger.onlyRecord().inboundUri()).isEqualTo("unknown");
+        });
+    }
 }
